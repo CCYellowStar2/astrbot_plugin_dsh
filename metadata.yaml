@@ -1,7 +1,17 @@
 name: astrbot_plugin_dsh
 display_name: DSH 桥
-desc: 把指定会话转发给本机 DeepSeek Harness（写代码 / 跑工具），不接管 AstrBot 日常聊天
-version: v0.2.0
+short_desc: 把指定会话接给本机 DeepSeek Harness，写代码 / 跑工具
+desc: |
+  把指定会话（群聊 / 私聊）转发给本机运行的 DeepSeek Harness（DSH），
+  由它在你的电脑上写代码、跑命令、读写文件，过程和结果实时回传到聊天里。
+
+  - 不接管 AstrBot 的日常聊天：只有绑定过 DSH 会话的会话才会被转发
+  - 文本、图片、文件双向传递（图片和文件会自动落到本机工作目录）
+  - 过程显示分档位：完整 / 每段时间一条简报 / 只留结果
+  - 审批和提问可以在聊天里直接回复（也可以继续在网页端点）
+
+  使用前需要先在电脑上装好 DSH，并启用 `dsh-astrbot-ingress` 入站插件。
+version: 0.2.0
 author: CCYellowStar2
 repo: "https://github.com/CCYellowStar2/astrbot_plugin_dsh"
 astrbot_version: ">=4.16"
@@ -11,3 +21,10 @@ support_platforms:
   - telegram
   - lark
   - wecom
+social_link: "https://github.com/CCYellowStar2"
+tags:
+  - dsh
+  - deepseek-harness
+  - coding-agent
+  - devtools
+  - bridge
