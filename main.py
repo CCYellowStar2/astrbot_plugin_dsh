@@ -826,6 +826,7 @@ class DshBridgePlugin(Star):
                         return
                     event_name = "message"
                     data_lines: list[str] = []
+                    trace_started = time.monotonic()
 
                     def flush_event():
                         raw = "\n".join(data_lines).strip()
@@ -853,10 +854,12 @@ class DshBridgePlugin(Star):
                             flushed = flush_event()
                             event_name = "message"
                             if flushed:
+                                self._trace_sse(flushed, trace_started)
                                 async for item in self._emit_sse(event, flushed):
                                     yield item
                     leftover = flush_event()
                     if leftover:
+                        self._trace_sse(leftover, trace_started)
                         async for item in self._emit_sse(event, leftover):
                             yield item
         except httpx.ConnectError:
@@ -1070,9 +1073,11 @@ class DshBridgePlugin(Star):
             except Exception as exc:  # noqa: BLE001
                 logger.warning("切换主动消息失败，保持被动：%s", exc)
                 proactive = False
+        started = time.monotonic()
         try:
             out = await event.send(result)
             self._count_sent(event)
+            self._trace_deliver(event, proactive, started, out)
             return out
         except Exception as exc:  # noqa: BLE001
             if not proactive or saved_id is None:
@@ -1085,7 +1090,40 @@ class DshBridgePlugin(Star):
             event.message_obj.message_id = saved_id
             out = await event.send(result)
             self._count_sent(event)
+            self._trace_deliver(event, False, started, out)
             return out
+
+    def _trace_deliver(self, event: AstrMessageEvent, proactive: bool, started: float, out) -> None:
+        """临时诊断：正文「慢一拍」到底卡在哪一段（ingress / AstrBot / QQ）。
+
+        每轮只多几行，定位完就可以删。看 AstrBot 日志里 `[dsh-trace]` 前缀。
+        """
+        if str(self._cfg("trace_delivery", "on") or "on").strip().lower() in {"off", "0", "false", "no"}:
+            return
+        mid = getattr(out, "message_id", None) or getattr(out, "id", None)
+        if not mid and isinstance(out, dict):
+            mid = out.get("message_id") or out.get("id")
+        via = "active" if proactive else "passive"
+        convo = self._convo_key(event)
+        logger.info(
+            "[dsh-trace] send via=%s %.0fms convo=%s mid=%s",
+            via,
+            (time.monotonic() - started) * 1000,
+            convo[-24:],
+            mid,
+        )
+
+    def _trace_sse(self, data: dict, started: float) -> None:
+        """临时诊断：每个 SSE 事件的到达时刻（相对本轮请求）。"""
+        if str(self._cfg("trace_delivery", "on") or "on").strip().lower() in {"off", "0", "false", "no"}:
+            return
+        text = str(data.get("text") or data.get("message") or "")
+        logger.info(
+            "[dsh-trace] sse %s +%.0fms %s",
+            data.get("_event"),
+            (time.monotonic() - started) * 1000,
+            text.replace("\n", " ⏎ ")[:60],
+        )
 
     async def _emit_sse(self, event: AstrMessageEvent, data: dict) -> AsyncIterator[str]:
         name = str(data.get("_event") or "message")
@@ -1159,6 +1197,7 @@ class DshBridgePlugin(Star):
             or payload.lower().startswith(("steer ", "use ", "ws ", "session ", "rename ", "send ", "model ", "last ", "perm ")) \
             or self._looks_like_approval(payload)
         self._reset_turn(event)
+        trace_turn = time.monotonic()
         if not quiet:
             await self._deliver(event, self._reply_result(event, "已交给 DeepSeek Harness…"))
         async for chunk in self._forward(event, payload):
@@ -1169,4 +1208,10 @@ class DshBridgePlugin(Star):
             if not mid and isinstance(result, dict):
                 mid = result.get("message_id") or result.get("id")
             self._remember_outbound(mid, chunk)
+            logger.info(
+                "[dsh-trace] body %d chars +%.0fms",
+                len(chunk),
+                (time.monotonic() - trace_turn) * 1000,
+            )
+        logger.info("[dsh-trace] turn done +%.0fms", (time.monotonic() - trace_turn) * 1000)
         event.stop_event()
