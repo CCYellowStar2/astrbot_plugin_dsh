@@ -62,8 +62,8 @@
     "default": 60
   },
   "inbound_url_base": {
-    "description": "URL 入站：DSH 能访问到的 AstrBot 基址（留空 = 不用）",
-    "hint": "形如 http://127.0.0.1:6185（从 DSH 那台机器看得见的地址）。填了它，大附件就不再需要共享目录：插件把附件登记成一次性 URL（/api/file/<token>），DSH 自己去下载。注意别照抄主配置的 callback_api_base —— 那常是容器内的 http://astrbot:6185，宿主机解析不了。",
+    "description": "URL 入站：DSH 能访问到的 AstrBot 基址（留空 = 自动候选）",
+    "hint": "形如 http://127.0.0.1:10000（从 DSH 那台机器看得见的地址）。填了就用它；留空则按「本机 dashboard 端口 → inbound_url_candidates」依次**探测**，第一个通（DSH 真能取到）的才用，都不通会在聊天里提醒一次。别照抄主配置的 callback_api_base —— 那常是容器内的 http://astrbot:6185，宿主机解析不了。",
     "type": "string",
     "default": ""
   },
@@ -79,6 +79,12 @@
     "hint": "超过就不走 URL（交给「太大」提示）。两端都要够：DSH 侧还有 ingress 的 inboundUrlMaxMb（默认 200）。",
     "type": "int",
     "default": 200
+  },
+  "inbound_url_candidates": {
+    "description": "URL 入站的候选地址（探测用）",
+    "hint": "每行一个：完整地址（http://127.0.0.1:10000）或裸端口（10000）。AstrBot 在 Docker 里看不到宿主把 6185 映射成了哪个端口，所以要把宿主端口列在这里；插件会让 DSH 侧真的取一次来确认，第一个通的才用，都不通时会在聊天里提醒一次。",
+    "type": "list",
+    "default": []
   },
   "session_scope": {
     "description": "群里谁和谁共用一条 DSH 会话",

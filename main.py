@@ -108,12 +108,14 @@ def _as_str_list(value: Any) -> list[str]:
     "astrbot_plugin_dsh",
     "local",
     "把指定会话转发给本机 DeepSeek Harness，不接管日常聊天",
-    "0.3.3",
+    "0.3.4",
 )
 class DshBridgePlugin(Star):
     # DSH 出站文本的隐藏标记（两个零宽空格）：QQ 里看不见，人格回复不会带。
     # 引用续聊靠它做精确判定，识别不到时再退回归一化指纹。
     OUTBOUND_TAG = "\u200b\u200b"
+    # URL 入站选中的 base 缓存多久（含失败结果，避免每条消息都扫一遍候选）
+    _INBOUND_URL_PICK_TTL = 600.0
 
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -128,6 +130,11 @@ class DshBridgePlugin(Star):
         self._proactive_denied = False
         # 信标只在第一次用上时打一条日志，别刷屏
         self._beacon_logged = False
+        # (时间, 选中的 URL 入站 base)：None 表示「探测过、都不通」
+        self._inbound_url_pick: tuple[float, str | None] = (0.0, None)
+        # 候选都不通时，在聊天里提醒一次就够
+        self._url_hint_needed = False
+        self._url_hint_shown = False
         self._quote_file = Path("/AstrBot/data/plugin_data/astrbot_plugin_dsh/quoted_ids.json")
         if not Path("/AstrBot/data").exists():
             self._quote_file = Path("data/plugin_data/astrbot_plugin_dsh/quoted_ids.json")
@@ -284,7 +291,7 @@ class DshBridgePlugin(Star):
         return self._dsh_side_path(dest), dest
 
     def _inbound_url_base(self) -> str:
-        """DSH 能访问到的 AstrBot 基址（如 `http://127.0.0.1:6185`）；留空 = 不走 URL 入站。
+        """DSH 能访问到的 AstrBot 基址（如 `http://127.0.0.1:6185`）；留空 = 走候选探测。
 
         注意不能用 AstrBot 主配置里的 `callback_api_base`：那是给协议端看的（Docker 里常是
         `http://astrbot:6185`），宿主机上的 DSH 解析不了。
@@ -298,6 +305,84 @@ class DshBridgePlugin(Star):
             mb = 200.0
         return int(max(1.0, mb) * 1024 * 1024)
 
+    def _dashboard_port(self) -> int | None:
+        """AstrBot 本体 dashboard 的端口（URL 入站最可能用的候选）。"""
+        try:
+            from astrbot.core import astrbot_config
+
+            raw = (astrbot_config.get("dashboard") or {}).get("port")
+            port = int(raw)
+            return port if 0 < port < 65536 else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _candidate_bases(self) -> list[str]:
+        """URL 入站的候选地址，按优先级：显式配置 > 本机 dashboard 端口 > 候选列表。
+
+        Docker 里 AstrBot 看不到「宿主把 6185 映射成了哪个端口」，所以后两个候选必须由
+        **ingress 侧探测**才能确认（见 `_resolve_inbound_base`）。
+        """
+        explicit = self._inbound_url_base()
+        if explicit:
+            return [explicit]
+        out: list[str] = []
+        port = self._dashboard_port()
+        if port:
+            out.append(f"http://127.0.0.1:{port}")
+        for item in _as_str_list(self._cfg("inbound_url_candidates", [])):
+            text = item.strip().rstrip("/")
+            if not text:
+                continue
+            if text.isdigit():
+                text = f"http://127.0.0.1:{text}"
+            elif not text.startswith(("http://", "https://")):
+                text = f"http://{text}"
+            if text not in out:
+                out.append(text)
+        return out
+
+    async def _probe_inbound_base(self, base: str, local: str) -> bool:
+        """让 ingress 用一次性 token 试着取一次：能不能取到，才代表这个 base 真的可用。"""
+        try:
+            # 每次 register_file 都是一次性 token —— 探测用的和真传的必须分开
+            from astrbot.core import file_token_service
+
+            token = await file_token_service.register_file(str(local))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("AstrBot 文件服务不可用（%s），回退共享目录 / base64", exc)
+            return False
+        url, bearer, _ = self._ingress_target()
+        try:
+            with httpx.Client(timeout=8.0, trust_env=False) as client:
+                r = client.get(
+                    f"{url}/probe-url",
+                    params={"url": f"{base}/api/file/{token}"},
+                    headers={"Authorization": f"Bearer {bearer}"},
+                )
+                if r.status_code != 200:
+                    return False
+                payload = r.json()
+                return bool(payload.get("ok"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("探测 %s 失败：%s", base, exc)
+            return False
+
+    async def _resolve_inbound_base(self, local: str) -> str | None:
+        """挑一个 DSH 真能访问到的 base；结果（含失败）缓存 `_INBOUND_URL_PICK_TTL` 秒。"""
+        now = time.time()
+        picked_at, picked = self._inbound_url_pick
+        if picked_at and now - picked_at < self._INBOUND_URL_PICK_TTL:
+            return picked
+        for base in self._candidate_bases():
+            if await self._probe_inbound_base(base, local):
+                logger.info("[dsh] URL 入站选中 %s（探测通过）", base)
+                self._inbound_url_pick = (now, base)
+                return base
+            logger.info("[dsh] URL 入站候选不可达：%s", base)
+        self._inbound_url_pick = (now, None)
+        self._url_hint_needed = True
+        return None
+
     async def _maybe_url_entry(self, local: str, name: str, kind: str) -> dict | None:
         """把本地附件登记成一次性 URL，交给 DSH 自己下载。
 
@@ -305,8 +390,9 @@ class DshBridgePlugin(Star):
         `always` = 所有附件都走 URL（完全不依赖共享目录）；`off` = 关闭。
         任何一步失败/未配置都返回 None，由调用方回退原有的共享目录 / base64。
         """
-        base = self._inbound_url_base()
-        if not base or not local:
+        if not local:
+            return None
+        if not self._candidate_bases():
             return None
         mode = str(self._cfg("inbound_url_mode", "auto") or "auto").strip().lower()
         if mode in {"off", "never", "false", "0", "no", "none"}:
@@ -319,13 +405,12 @@ class DshBridgePlugin(Star):
             return None
         if size > self._inbound_url_limit():
             return None  # 太大：交给后面的 too_big 提示，别让 DSH 白下一遍
-        try:
-            # AstrBot 把单例挂在包里（`astrbot/core/__init__.py: file_token_service = FileTokenService()`）
-            from astrbot.core import file_token_service
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("AstrBot 文件服务不可用（%s），回退共享目录 / base64", exc)
+        base = await self._resolve_inbound_base(local)
+        if not base:
             return None
         try:
+            from astrbot.core import file_token_service
+
             token = await file_token_service.register_file(str(local))
         except Exception as exc:  # noqa: BLE001
             logger.warning("登记入站 URL 失败（%s），回退共享目录 / base64", exc)
@@ -848,8 +933,17 @@ class DshBridgePlugin(Star):
         if too_big:
             if self._inbound_url_base():
                 url_hint = "，或把 inbound_url_max_mb 调大（URL 入站的上限）"
+            elif self._url_hint_needed and not self._url_hint_shown:
+                self._url_hint_shown = True
+                tried = "、".join(self._candidate_bases()) or "（无候选）"
+                url_hint = (
+                    f"。URL 入站试过这些地址都不通：{tried}"
+                    "（AstrBot 在 Docker 里时，要填宿主机能访问到的那一个，例如 "
+                    "`docker port` 查到的映射端口 `http://127.0.0.1:10000`；"
+                    "也可以把候选写进 `inbound_url_candidates`）"
+                )
             else:
-                url_hint = "，或者填 inbound_url_base 走 URL 入站（不用挂共享盘，需要 DSH 能访问到 AstrBot 的 HTTP）"
+                url_hint = "，或者填 inbound_url_base 走 URL 入站（不用挂共享盘）"
             share_hint = "" if self._cfg("inbound_share_dir", "") else "，或在插件配置里填 inbound_share_dir / inbound_dsh_prefix 走共享目录"
             yield "附件太大没能传过去（超过 12MB）：" + "、".join(too_big) + share_hint + url_hint + "。"
         if missing:
