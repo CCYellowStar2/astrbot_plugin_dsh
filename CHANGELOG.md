@@ -2,9 +2,7 @@
 
 ## 0.3.0 — 2026-09-12
 
-把 AstrBot 插件市场上另外三个 DSH 插件（`astrbot_plugin_dsh_connector`、Fantasality 与 ennazong 的
-`astrbot_plugin_dsh_bridge`）各读了一遍代码，挑出三件值得抄的事；顺带记下「直接调 DSH `/api`」
-那条路为什么走不通。
+配置更省事、长代码块不再被切坏。
 
 ### 新增
 
@@ -16,19 +14,8 @@
 - 长消息分片**照顾代码块**：切在未闭合的 ```` ``` ```` 里时，本条补上闭合、下一条用原语言标签重新打开
   （`splitForIm` / `openFence`，见 `test/pure.test.js`）。从前只按换行/句号断，长代码块被腰斩后
   两边各自渲染成一坨。
-- 会话键三级兜底：`unified_msg_origin` → `session_id` → `sender_id`。有些适配器/自建调用不带 umo，
+- 会话键三级兜底：`unified_msg_origin` → `session_id` → `sender_id`。有些适配器 / 自建调用不带 umo，
   从前会把它们全挤进同一个空键里。
-
-### 记录（不是本插件的功能）
-
-- 实测本机 DSH 0.1.5-rc.1：`/api` 的任意形状（`/api/host.describe`、`/api/host/describe`、
-  `/api/session/list`、带 `args` 包裹、加 `Origin`/`Referer`/`?token=`/伪造 cookie）**一律 401**。
-  DSH 的门是「每进程随机 launch token（只在内存，`dsh web` 打印的 `/?token=…` 是唯一出口）
-  → 换 HMAC 签名 cookie」。所以「零安装的纯 HTTP 客户端」这类插件在这套 DSH 上拿不到东西，
-  它们代码里也确实一处 cookie/token 都没有；能跑通的只有 shell 出去调 `dsh --profile headless`
-  那条腿（无上下文、无流式）。我们走 DSH 宿主插件这条路，代价是要装一个插件，换来的是
-  `session/event`、`approval/request`、`user-questions/request` 三条事件流——审批和提问能进聊天
-  靠的就是这个，而不是隔着 401 猜轮询。
 
 ## 0.2.0 — 2026-09-10
 

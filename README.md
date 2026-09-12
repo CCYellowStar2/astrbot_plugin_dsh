@@ -7,7 +7,8 @@
 
 把 QQ / 其它 IM 里指定的对话转给本机 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)。AstrBot 继续当网关和日常人格，DSH 只在 `/dsh`（可改）接手写代码、跑工具。
 
-需要先装 DSH 侧插件 **dsh-astrbot-ingress**（本目录的上一级仓库），否则本插件连不上。
+**本插件只是桥的一半，另一半是 DSH 侧的 [`dsh-astrbot-ingress`](https://github.com/CCYellowStar2/dsh-astrbot-ingress)，不装它连不上。**
+它跑在 DSH 进程里，把会话事件 / 审批 / 提问推给本插件，并在 `~/.dsh/astrbot-ingress.json` 写下实际端口与 token 供本插件自动发现。
 
 ```
 QQ ──OneBot──▶ AstrBot（本插件）──HTTP──▶ DSH :3188 ──▶ Agent
@@ -216,5 +217,3 @@ DSH 用 `ask_user_question` 问你时（含 plan 模式的计划确认），问�
 | 群里发了没反应 | 需要 `/dsh`、`@机器人` 或引用机器人；确认管理员或白名单 |
 | 模型只回文件路径、不描述画面 | 当前 DSH 模型不支持视觉，换带 image 输入的模型 |
 | 主动消息 `40034105` | 在开放平台给该群开启「主动通知」 |
-
-DSH 侧插件（本插件的另一半）在 [`dsh-astrbot-ingress`](https://github.com/CCYellowStar2/dsh-astrbot-ingress)。
