@@ -20,6 +20,26 @@ QQ ──OneBot──▶ AstrBot（本插件）──HTTP──▶ DSH :3188 ─
 - 已启动、且已加载 `dsh-astrbot-ingress` 的 `dsh web`
 - 平台不限：OneBot（NapCat / SnowLuma / aiocqhttp）、QQ 官方、Telegram、飞书、企微等，走 AstrBot 适配器
 
+## 快速开始（只填一个 `token`）
+
+1. DSH 侧装好 [`dsh-astrbot-ingress`](https://github.com/CCYellowStar2/dsh-astrbot-ingress) 并重启 `dsh web`。
+2. 本插件装好后**重载**。
+3. 只填 `token`：抄 `%DSH_HOME%/dsh-astrbot-ingress/config.json` 里的那段，粘进本插件的 `token`。
+   （AstrBot 与 DSH 同一台机器时可以**留空** —— 插件会读 `%DSH_HOME%/astrbot-ingress.json` 信标。）
+4. 回聊天窗口发 `/dsh 你好`。
+
+**地址不用填**：`ingress_url` 留空会自己探（信标 → `host.docker.internal:3188` → `127.0.0.1:3188`
+→ `ingress_url_candidates`），`/health` 第一个通的才用。**文件也不用挂盘**：入站大附件走一次性 URL，
+出站文件这边看不到时向 ingress 要一次性凭证拉过来再发。
+
+| 你的情况 | 除了 `token` 还要填什么 |
+|---|---|
+| 与 DSH 同一台机器 | **什么都不用**（`token` 也留空） |
+| 本插件跑在 Docker（官方 compose） | **只填 `token`** |
+| Linux 上的 Docker | 同上 + compose 加 `extra_hosts: ["host.docker.internal:host-gateway"]` |
+| 宿主机映射端口不是 `6185`（如 `6185 → 10000`） | `inbound_url_candidates` 填宿主端口（`10000`），只影响走 URL 的大附件通道 |
+| 与协议端（NapCat/SnowLuma）分容器且挂载点不同名 | `send_protocol_path`（+ 需要时 `send_outbox_dir`） |
+
 ## 安装
 
 **方式一：AstrBot 插件市场**（推荐）——在 AstrBot WebUI 的插件市场搜索 `dsh` 或「DSH 桥」一键安装
@@ -30,15 +50,15 @@ QQ ──OneBot──▶ AstrBot（本插件）──HTTP──▶ DSH :3188 ─
 
 装完重载 **DSH 桥**。同机部署**什么都不用填**：DSH 里的 ingress 插件会把端口和 token 写进
 `~/.dsh/astrbot-ingress.json`，本插件自动读。容器部署（AstrBot 在 Docker 里）看不到那个文件，
-需要手填 `ingress_url`（`http://host.docker.internal:3188`）与 `token`。
+**填上 `token` 即可** —— `ingress_url` 留空会自动探 `host.docker.internal:3188`。
 
 ## 配置
 
 | 项 | 默认 | 说明 |
 |---|---|---|
 | `enabled` | 开 | 总开关 |
-| `ingress_url` | 空 = 自动发现 | **同机部署留空即可**：DSH 里的 ingress 插件会把实际端口写进 `~/.dsh/astrbot-ingress.json`，本插件自动读；读不到才回退 `127.0.0.1:3188`。AstrBot 在 Docker、DSH 在宿主机时看不到该文件，填 `http://host.docker.internal:3188`（Linux 可能要 `--add-host=host.docker.internal:host-gateway`） |
-| `token` | 空 = 自动发现 | 同机部署留空即可（从上面的信标文件读）；容器部署必填，值与 DSH 侧 `%DSH_HOME%/dsh-astrbot-ingress/config.json` 的 `token` 相同 |
+| `ingress_url` | 空 = 自动发现 | **留空即可，Docker 也一样**：依次尝试 信标文件（`~/.dsh/astrbot-ingress.json`）→ `http://host.docker.internal:3188` → `http://127.0.0.1:3188` → `ingress_url_candidates`，用 `/health` 探一遍取第一个通的（缓存 5 分钟）。只有都不通或网络特殊才手填。Linux 的 Docker 需要 compose 里加 `extra_hosts: ["host.docker.internal:host-gateway"]` |
+| `token` | 空 = 自动发现 | 同机部署留空即可（从信标文件读）；容器部署**必填**，值与 DSH 侧 `%DSH_HOME%/dsh-astrbot-ingress/config.json` 的 `token` 相同。**这是唯一的必填项** |
 | `command` | `dsh` | 唤醒前缀，聊天里发 `/dsh …` |
 | `private_passthrough` | 关 | 打开后私聊全部进 DSH，不再走 AstrBot 人格 |
 | `allow_users` | 空 | 允许使用 DSH 的用户 ID；空 = 仅管理员 |
@@ -65,6 +85,7 @@ QQ ──OneBot──▶ AstrBot（本插件）──HTTP──▶ DSH :3188 ─
 | `inbound_url_mode` | `auto` | `auto` = 只有超过 12MB 的附件走 URL；`always` = 所有附件都走 URL（完全不依赖共享目录）；`off` = 关 |
 | `inbound_url_max_mb` | 200 | URL 入站的单文件上限（DSH 侧 `inboundUrlMaxMb` 也要够） |
 | `official_send_mode` | `passive-first` | 官方 QQ 机器人的发送方式，见下 |
+| `trace_delivery` | 关 | 诊断：打开后每轮在 AstrBot 日志里多几行 `[dsh-trace]`（SSE 事件到达时刻 / 每条正文的发送时刻 / 被动还是主动）。只在排查「正文慢一拍」「消息顺序不对」这类跨进程时序问题时开，排完关掉 |
 
 ### 官方 QQ 机器人的发送方式
 
@@ -125,7 +146,7 @@ D:\proj\.dsh-inbox  ⇄   /mnt/d/proj/.dsh-inbox    —                     入�
 - **别照抄 `callback_api_base`**：那是给协议端看的（Docker 里常是 `http://astrbot:6185`），
   宿主机上的 DSH 解析不了 —— 所以这里要填「宿主视角」的地址。
 - 失败会自动回退：URL 拿不到 → 共享目录 → base64 → 最后才是「太大」提示。
-- 出站不受影响（出站走的还是共享目录 / 回调 URL，见下）。
+- 出站不受影响：文件看不见时走 `outbound_pull` 兜底（见下），根本不依赖共享目录。
 
 ### AstrBot 与协议端分容器（Docker）
 
@@ -155,7 +176,10 @@ services:
 - 内置了两个兜底目录（`/app/snowluma-data/dsh-outbox`、`/app/napcat/data/dsh-outbox`），**只在父目录确实存在时**才用，且只补建最后一级；稳妥起见显式填 `send_protocol_path`。
 - Linux Docker 把 `D:/:/mnt/d` 换成 `-v /home/me/workspace:/mnt/workspace`，配置里的 `D:\...` 相应改成 `/mnt/workspace/...`。
 - 官方 QQ 机器人由 AstrBot 自己上传附件，出站固定 `direct`，不需要共享盘。
-- **最省事的通用做法**：在 AstrBot 主配置里填 `callback_api_base`（协议端能访问到的 AstrBot 地址，如 `http://astrbot:6185`）。出站文件 / 图片 / 视频会注册成 URL 交给协议端下载，**不需要任何共享盘**，也不用管两边挂载点是否同名。
+- **出站文件已经不用挂盘了**：包里看不到文件时，插件向 ingress 要一张一次性凭证把文件拉进
+  `data/temp` 再发（`outbound_pull`，默认开）。要挂共享盘的主要是**出站图片 / 视频**这类走
+  AstrBot 自己上传路径的内容 —— 那种情况更省事的做法是填 AstrBot 主配置的 `callback_api_base`
+  （协议端能访问到的 AstrBot 地址，如 `http://astrbot:6185`），让它注册成 URL 交给协议端下载。
 
 ## 用法
 

@@ -108,7 +108,7 @@ def _as_str_list(value: Any) -> list[str]:
     "astrbot_plugin_dsh",
     "local",
     "把指定会话转发给本机 DeepSeek Harness，不接管日常聊天",
-    "0.3.6",
+    "0.3.7",
 )
 class DshBridgePlugin(Star):
     # DSH 出站文本的隐藏标记（两个零宽空格）：QQ 里看不见，人格回复不会带。
@@ -1328,12 +1328,17 @@ class DshBridgePlugin(Star):
             self._trace_deliver(event, False, started, out)
             return out
 
-    def _trace_deliver(self, event: AstrMessageEvent, proactive: bool, started: float, out) -> None:
-        """临时诊断：正文「慢一拍」到底卡在哪一段（ingress / AstrBot / QQ）。
+    def _trace_on(self) -> bool:
+        """诊断日志开关：默认**关**（0.3.7 起）。
 
-        每轮只多几行，定位完就可以删。看 AstrBot 日志里 `[dsh-trace]` 前缀。
+        打开后每轮多几行 `[dsh-trace]`：SSE 事件到达时刻、每条正文的发送时刻、passive/active。
+        正文「慢一拍」这类跨进程时序问题只能靠它定位，平时不用开。
         """
-        if str(self._cfg("trace_delivery", "on") or "on").strip().lower() in {"off", "0", "false", "no"}:
+        return str(self._cfg("trace_delivery", "off") or "off").strip().lower() in {"on", "1", "true", "yes"}
+
+    def _trace_deliver(self, event: AstrMessageEvent, proactive: bool, started: float, out) -> None:
+        """诊断：正文「慢一拍」到底卡在哪一段（ingress / AstrBot / QQ）。看 `[dsh-trace]` 前缀。"""
+        if not self._trace_on():
             return
         mid = getattr(out, "message_id", None) or getattr(out, "id", None)
         if not mid and isinstance(out, dict):
@@ -1349,8 +1354,8 @@ class DshBridgePlugin(Star):
         )
 
     def _trace_sse(self, data: dict, started: float) -> None:
-        """临时诊断：每个 SSE 事件的到达时刻（相对本轮请求）。"""
-        if str(self._cfg("trace_delivery", "on") or "on").strip().lower() in {"off", "0", "false", "no"}:
+        """诊断：每个 SSE 事件的到达时刻（相对本轮请求）。"""
+        if not self._trace_on():
             return
         text = str(data.get("text") or data.get("message") or "")
         logger.info(
@@ -1514,10 +1519,12 @@ class DshBridgePlugin(Star):
             if not mid and isinstance(result, dict):
                 mid = result.get("message_id") or result.get("id")
             self._remember_outbound(mid, chunk)
-            logger.info(
-                "[dsh-trace] body %d chars +%.0fms",
-                len(chunk),
-                (time.monotonic() - trace_turn) * 1000,
-            )
-        logger.info("[dsh-trace] turn done +%.0fms", (time.monotonic() - trace_turn) * 1000)
+            if self._trace_on():
+                logger.info(
+                    "[dsh-trace] body %d chars +%.0fms",
+                    len(chunk),
+                    (time.monotonic() - trace_turn) * 1000,
+                )
+        if self._trace_on():
+            logger.info("[dsh-trace] turn done +%.0fms", (time.monotonic() - trace_turn) * 1000)
         event.stop_event()

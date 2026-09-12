@@ -5,12 +5,6 @@
     "default": true
   },
   "ingress_url": {
-    "description": "DSH ingress 地址（留空 = 同机自动发现）",
-    "hint": "同机部署留空即可：DSH 里的 dsh-astrbot-ingress 会把实际端口写进 ~/.dsh/astrbot-ingress.json，本插件自动读；读不到才回退 127.0.0.1:3188。AstrBot 在 Docker 里看不到该文件，请填 http://host.docker.internal:3188。",
-    "type": "string",
-    "default": ""
-  },
-  "ingress_url": {
     "description": "DSH ingress 地址（留空 = 自动）",
     "hint": "留空时依次尝试：同机信标文件（~/.dsh/astrbot-ingress.json）→ 候选探测（host.docker.internal:3188 → 127.0.0.1:3188 → 下面的候选列表）。Docker 部署通常留空就够（走 host.docker.internal）；非默认端口或特殊网络再手填。",
     "type": "string",
@@ -184,5 +178,11 @@
     "hint": "填协议端容器里的目录，如 /app/napcat/data/dsh-outbox。AstrBot 也能写这里时，文件会直接拷到这里再发。",
     "type": "string",
     "default": ""
+  },
+  "trace_delivery": {
+    "description": "诊断日志（排障用，平时关着）",
+    "hint": "打开后每轮在 AstrBot 日志里多几行 `[dsh-trace]`：SSE 事件到达时刻、每条正文的发送时刻、被动/主动。只在排查「正文慢一拍」「消息顺序不对」这类跨进程时序问题时开，排完关掉。DSH 侧对应的开关是 ingress 的 `traceLog`。",
+    "type": "bool",
+    "default": false
   }
 }

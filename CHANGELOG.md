@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.7 — 2026-09-12
+
+### 变更
+
+- **诊断日志默认关**：DSH 侧 `traceLog`、AstrBot 侧 `trace_delivery` 从「默认开」改成「默认关」
+  （0.3.6 上线时为了排「正文慢一拍」，实机验证已通过）。要排障时临时打开：
+  - `traceLog: true` → `%DSH_HOME%/dsh-astrbot-ingress/trace.log`（`adopt-turn` / `drop-stale` /
+    `grace-flush` / `turn-end`，>1MB 自动归档 `.old`）；
+  - AstrBot 插件 `trace_delivery` 打开 → 日志里 `[dsh-trace]` 前缀（SSE 到达时刻、每条正文的发送
+    时刻、被动/主动）。顺带补上了两处漏网的无条件日志（`body … chars`/`turn done`），它们之前没受开关控制。
+- AstrBot 插件配置项 `trace_delivery` **补进配置 schema**（此前只能手改 JSON），默认 `false`。
+- 修掉 `_conf_schema.json` 里**重复的 `ingress_url` 键**（JSON 解析取后者，前者是死配置）。
+
+### 文档
+
+- 两个 README 都新增「**快速开始**」：**只需要填 `token`**（同机连它都能留空），地址自动探测、
+  文件不用挂盘；并给出「你的情况 → 还要多填什么」对照表。
+- 刷新过时的「最少配置」表述：Docker 下 `ingress_url` 已可留空（0.3.6 起的候选探测），
+  出站文件不再需要共享盘（0.3.6 起的拉取兜底），共享目录从「必需」降级为「出站图片 / 视频才可能要」。
+
 ## 0.3.6 — 2026-09-12
 
 ### 新增
