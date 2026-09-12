@@ -21,10 +21,13 @@ QQ ──OneBot──▶ AstrBot（本插件）──HTTP──▶ DSH :3188 ─
 
 ## 安装
 
-1. 装插件：在 AstrBot WebUI 的插件页填仓库地址 `https://github.com/CCYellowStar2/astrbot_plugin_dsh`，
-   或把整个 `astrbot_plugin_dsh` 文件夹放进 AstrBot 的 `data/plugins/`
-2. 重载 **DSH 桥**
-3. 打开插件配置，填入 token 与 ingress 地址
+**方式一：AstrBot 插件市场**（推荐）——在 AstrBot WebUI 的插件市场搜索 `dsh` 或「DSH 桥」一键安装
+（市场页面：<https://cloud.astrbot.app/market>）。
+
+**方式二：填仓库地址** —— 在 AstrBot WebUI 的插件页填 `https://github.com/CCYellowStar2/astrbot_plugin_dsh`，
+或把整个 `astrbot_plugin_dsh` 文件夹放进 AstrBot 的 `data/plugins/`。
+
+装完重载 **DSH 桥**，再打开插件配置填入 token 与 ingress 地址。
 
 ## 配置
 
