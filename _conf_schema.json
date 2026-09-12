@@ -5,14 +5,14 @@
     "default": true
   },
   "ingress_url": {
-    "description": "DSH ingress 地址",
-    "hint": "同机填 http://127.0.0.1:3188；AstrBot 在 Docker 填 http://host.docker.internal:3188",
+    "description": "DSH ingress 地址（留空 = 同机自动发现）",
+    "hint": "同机部署留空即可：DSH 里的 dsh-astrbot-ingress 会把实际端口写进 ~/.dsh/astrbot-ingress.json，本插件自动读；读不到才回退 127.0.0.1:3188。AstrBot 在 Docker 里看不到该文件，请填 http://host.docker.internal:3188。",
     "type": "string",
-    "default": "http://127.0.0.1:3188"
+    "default": ""
   },
   "token": {
-    "description": "与 DSH ingress 相同的 Bearer token",
-    "hint": "在宿主机 %DSH_HOME%/dsh-astrbot-ingress/config.json 里复制 token",
+    "description": "与 DSH ingress 相同的 Bearer token（留空 = 同机自动发现）",
+    "hint": "同机部署留空即可，从上面的信标文件里读。容器部署要手填：token 在宿主机 %DSH_HOME%/dsh-astrbot-ingress/config.json。",
     "type": "string",
     "default": ""
   },

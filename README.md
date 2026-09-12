@@ -27,15 +27,17 @@ QQ ──OneBot──▶ AstrBot（本插件）──HTTP──▶ DSH :3188 ─
 **方式二：填仓库地址** —— 在 AstrBot WebUI 的插件页填 `https://github.com/CCYellowStar2/astrbot_plugin_dsh`，
 或把整个 `astrbot_plugin_dsh` 文件夹放进 AstrBot 的 `data/plugins/`。
 
-装完重载 **DSH 桥**，再打开插件配置填入 token 与 ingress 地址。
+装完重载 **DSH 桥**。同机部署**什么都不用填**：DSH 里的 ingress 插件会把端口和 token 写进
+`~/.dsh/astrbot-ingress.json`，本插件自动读。容器部署（AstrBot 在 Docker 里）看不到那个文件，
+需要手填 `ingress_url`（`http://host.docker.internal:3188`）与 `token`。
 
 ## 配置
 
 | 项 | 默认 | 说明 |
 |---|---|---|
 | `enabled` | 开 | 总开关 |
-| `ingress_url` | `http://127.0.0.1:3188` | 同机用这个；AstrBot 在 Docker、DSH 在宿主机用 `http://host.docker.internal:3188`（Linux 可能要 `--add-host=host.docker.internal:host-gateway`） |
-| `token` | 空 | 与 DSH 侧 `%DSH_HOME%/dsh-astrbot-ingress/config.json` 的 `token` 相同，必填 |
+| `ingress_url` | 空 = 自动发现 | **同机部署留空即可**：DSH 里的 ingress 插件会把实际端口写进 `~/.dsh/astrbot-ingress.json`，本插件自动读；读不到才回退 `127.0.0.1:3188`。AstrBot 在 Docker、DSH 在宿主机时看不到该文件，填 `http://host.docker.internal:3188`（Linux 可能要 `--add-host=host.docker.internal:host-gateway`） |
+| `token` | 空 = 自动发现 | 同机部署留空即可（从上面的信标文件读）；容器部署必填，值与 DSH 侧 `%DSH_HOME%/dsh-astrbot-ingress/config.json` 的 `token` 相同 |
 | `command` | `dsh` | 唤醒前缀，聊天里发 `/dsh …` |
 | `private_passthrough` | 关 | 打开后私聊全部进 DSH，不再走 AstrBot 人格 |
 | `allow_users` | 空 | 允许使用 DSH 的用户 ID；空 = 仅管理员 |

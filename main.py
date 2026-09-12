@@ -1,8 +1,10 @@
 import base64
 import json
+import os
 import re
 import shutil
 import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, AsyncIterator
 
@@ -13,6 +15,78 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.message.components import At, File, Image, Plain, Reply, Video
+
+
+# ── 同机信标：ingress 把实际端口与 token 写在 ~/.dsh/astrbot-ingress.json ──
+# 配置里留空就走它，省掉「复制 token / 猜端口」这一步。容器里的 AstrBot 看不到
+# 这个文件（要手填 host.docker.internal），所以配置优先、信标兜底。
+BEACON_FILENAME = "astrbot-ingress.json"
+BEACON_MAX_AGE_SEC = 600  # ingress 每 30 秒刷新一次，10 分钟没动静就当它没了
+BEACON_EARLY_TOLERANCE_SEC = 60  # 容忍两边时钟差
+_beacon_cache: dict[str, Any] = {"at": 0.0, "data": None}
+
+
+def _parse_iso_ts(value: Any) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _beacon_paths() -> list[Path]:
+    paths: list[Path] = []
+    env = os.environ.get("DSH_INGRESS_BEACON", "").strip()
+    if env:
+        paths.append(Path(env))
+    for home in (os.path.expanduser("~"), os.environ.get("USERPROFILE", "")):
+        if not home:
+            continue
+        path = Path(home) / ".dsh" / BEACON_FILENAME
+        if path not in paths:
+            paths.append(path)
+    return paths
+
+
+def read_ingress_beacon(now: float | None = None, max_age: float = BEACON_MAX_AGE_SEC) -> dict[str, Any] | None:
+    """读本机 ingress 的信标；坏文件、别人的文件、过期的一律当没有。"""
+    now = time.time() if now is None else now
+    for path in _beacon_paths():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(data, dict) or data.get("kind") != "dsh-astrbot-ingress":
+            continue
+        url = str(data.get("url") or "").strip().rstrip("/")
+        if not url:
+            continue
+        ts = _parse_iso_ts(data.get("updatedAt"))
+        if ts is None or not (-BEACON_EARLY_TOLERANCE_SEC <= now - ts <= max_age):
+            continue
+        return {
+            "url": url,
+            "token": str(data.get("token") or "").strip(),
+            "version": data.get("version"),
+            "path": str(path),
+        }
+    return None
+
+
+def _cached_beacon(ttl: float = 60.0) -> dict[str, Any] | None:
+    """带缓存的信标读取：每 60 秒最多摸一次磁盘。"""
+    now = time.time()
+    if now - float(_beacon_cache.get("at") or 0.0) < ttl:
+        return _beacon_cache.get("data")
+    data = read_ingress_beacon()
+    _beacon_cache["at"] = now
+    _beacon_cache["data"] = data
+    return data
 
 
 def _as_str_list(value: Any) -> list[str]:
@@ -32,7 +106,7 @@ def _as_str_list(value: Any) -> list[str]:
     "astrbot_plugin_dsh",
     "local",
     "把指定会话转发给本机 DeepSeek Harness，不接管日常聊天",
-    "0.2.0",
+    "0.3.0",
 )
 class DshBridgePlugin(Star):
     # DSH 出站文本的隐藏标记（两个零宽空格）：QQ 里看不见，人格回复不会带。
@@ -50,6 +124,8 @@ class DshBridgePlugin(Star):
         self._dsh_cwd: dict[str, tuple[str, float]] = {}
         # 撞过 40034105 就置位：本进程内不再尝试主动消息
         self._proactive_denied = False
+        # 信标只在第一次用上时打一条日志，别刷屏
+        self._beacon_logged = False
         self._quote_file = Path("/AstrBot/data/plugin_data/astrbot_plugin_dsh/quoted_ids.json")
         if not Path("/AstrBot/data").exists():
             self._quote_file = Path("data/plugin_data/astrbot_plugin_dsh/quoted_ids.json")
@@ -304,8 +380,7 @@ class DshBridgePlugin(Star):
         """
         if not umo:
             return False
-        url = str(self._cfg("ingress_url", "http://127.0.0.1:3188")).rstrip("/")
-        token = str(self._cfg("token", "") or "").strip()
+        url, token, _ = self._ingress_target()
         if not token:
             return False
         try:
@@ -570,6 +645,31 @@ class DshBridgePlugin(Star):
                 pass
         return result
 
+    def _ingress_target(self) -> tuple[str, str, str]:
+        """(base_url, token, 来源)。配置留空时用同机 ingress 的信标兜底。"""
+        url = str(self._cfg("ingress_url", "") or "").strip().rstrip("/")
+        token = str(self._cfg("token", "") or "").strip()
+        source = "config"
+        if not url or not token:
+            beacon = _cached_beacon()
+            if beacon:
+                if not url:
+                    url = beacon["url"]
+                if not token and beacon.get("token"):
+                    token = beacon["token"]
+                source = "beacon"
+                if not self._beacon_logged:
+                    self._beacon_logged = True
+                    logger.info(
+                        "[dsh] 用同机信标 %s：%s（ingress %s）",
+                        beacon["path"],
+                        url,
+                        beacon.get("version") or "?",
+                    )
+        if not url:
+            url = "http://127.0.0.1:3188"
+        return url, token, source
+
     def _cfg(self, key: str, default: Any) -> Any:
         if hasattr(self.config, "get"):
             value = self.config.get(key, default)
@@ -664,11 +764,16 @@ class DshBridgePlugin(Star):
         return False, ""
 
     async def _forward(self, event: AstrMessageEvent, text: str) -> AsyncIterator[str]:
-        url = str(self._cfg("ingress_url", "http://127.0.0.1:3188")).rstrip("/")
-        token = str(self._cfg("token", "") or "").strip()
+        url, token, _source = self._ingress_target()
         timeout = float(self._cfg("timeout_sec", 600) or 600)
         if not token:
-            yield "DSH 桥未配置 token。打开插件配置，填入宿主机 ~/.dsh/dsh-astrbot-ingress/config.json 里的 token。"
+            yield (
+                "DSH 桥没拿到 token，也没找到同机信标（~/.dsh/astrbot-ingress.json）。"
+                "同机部署：确认 DSH 里已启用 dsh-astrbot-ingress（它会写这个文件），"
+                "插件配置里的 ingress_url / token 留空即可；"
+                "容器部署：ingress_url 填 host.docker.internal:3188，token 手动填"
+                "宿主机 ~/.dsh/dsh-astrbot-ingress/config.json 里那个。"
+            )
             return
         files = await self._collect_files(event)
         missing = [f.get("name") or "文件" for f in files if f.get("missing")]
@@ -900,7 +1005,16 @@ class DshBridgePlugin(Star):
         键只在**插件侧**改写：ingress 那边 umo 纯粹是索引键（它从不用 umo 发消息，
         实际发送走 AstrBot 的事件），所以会话/回合/审批/提问/进度会自动跟着隔离。
         """
-        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        if not umo:
+            # 有些适配器 / 自建调用不带 umo：退到 session_id，再退到 sender_id，
+            # 至少别把所有会话都挤进同一个空键里（跟同类插件学的兜底链）。
+            umo = str(getattr(event, "session_id", "") or "").strip()
+        if not umo:
+            try:
+                umo = str(event.get_sender_id() or "").strip()
+            except Exception:  # noqa: BLE001
+                umo = ""
         if str(self._cfg("session_scope", "group") or "group").strip().lower() != "user":
             return umo
         try:
