@@ -61,6 +61,25 @@
     "type": "int",
     "default": 60
   },
+  "inbound_url_base": {
+    "description": "URL 入站：DSH 能访问到的 AstrBot 基址（留空 = 不用）",
+    "hint": "形如 http://127.0.0.1:6185（从 DSH 那台机器看得见的地址）。填了它，大附件就不再需要共享目录：插件把附件登记成一次性 URL（/api/file/<token>），DSH 自己去下载。注意别照抄主配置的 callback_api_base —— 那常是容器内的 http://astrbot:6185，宿主机解析不了。",
+    "type": "string",
+    "default": ""
+  },
+  "inbound_url_mode": {
+    "description": "URL 入站的时机",
+    "hint": "auto=只有超过 12MB（base64 上限）的附件走 URL（默认）；always=所有附件都走 URL，完全不依赖共享目录；off=关闭。任何一步失败都自动回退到共享目录/base64。",
+    "type": "string",
+    "options": ["auto", "always", "off"],
+    "default": "auto"
+  },
+  "inbound_url_max_mb": {
+    "description": "URL 入站单文件上限（MB）",
+    "hint": "超过就不走 URL（交给「太大」提示）。两端都要够：DSH 侧还有 ingress 的 inboundUrlMaxMb（默认 200）。",
+    "type": "int",
+    "default": 200
+  },
   "session_scope": {
     "description": "群里谁和谁共用一条 DSH 会话",
     "hint": "group=一个群共用一条（默认）。user=群里每人一条（各自独立的上下文/工作区/模型/权限）；想共用的人各自 /dsh use <同一个短id> 组队。切换后原群会话闲置，自己也要 /dsh use 接回来。回复仍发在群里 —— 隔离的是上下文，不是隐私。",

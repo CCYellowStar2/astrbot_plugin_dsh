@@ -21,6 +21,8 @@ from astrbot.core.message.components import At, File, Image, Plain, Reply, Video
 # 配置里留空就走它，省掉「复制 token / 猜端口」这一步。容器里的 AstrBot 看不到
 # 这个文件（要手填 host.docker.internal），所以配置优先、信标兜底。
 BEACON_FILENAME = "astrbot-ingress.json"
+# base64 入站的上限：超过它就走共享目录或 URL 入站（两处判定共用）
+INBOUND_BASE64_LIMIT = 12 * 1024 * 1024
 BEACON_MAX_AGE_SEC = 600  # ingress 每 30 秒刷新一次，10 分钟没动静就当它没了
 BEACON_EARLY_TOLERANCE_SEC = 60  # 容忍两边时钟差
 _beacon_cache: dict[str, Any] = {"at": 0.0, "data": None}
@@ -106,7 +108,7 @@ def _as_str_list(value: Any) -> list[str]:
     "astrbot_plugin_dsh",
     "local",
     "把指定会话转发给本机 DeepSeek Harness，不接管日常聊天",
-    "0.3.2",
+    "0.3.3",
 )
 class DshBridgePlugin(Star):
     # DSH 出站文本的隐藏标记（两个零宽空格）：QQ 里看不见，人格回复不会带。
@@ -281,6 +283,55 @@ class DshBridgePlugin(Star):
             return None
         return self._dsh_side_path(dest), dest
 
+    def _inbound_url_base(self) -> str:
+        """DSH 能访问到的 AstrBot 基址（如 `http://127.0.0.1:6185`）；留空 = 不走 URL 入站。
+
+        注意不能用 AstrBot 主配置里的 `callback_api_base`：那是给协议端看的（Docker 里常是
+        `http://astrbot:6185`），宿主机上的 DSH 解析不了。
+        """
+        return str(self._cfg("inbound_url_base", "") or "").strip().rstrip("/")
+
+    def _inbound_url_limit(self) -> int:
+        try:
+            mb = float(self._cfg("inbound_url_max_mb", 200) or 200)
+        except (TypeError, ValueError):
+            mb = 200.0
+        return int(max(1.0, mb) * 1024 * 1024)
+
+    async def _maybe_url_entry(self, local: str, name: str, kind: str) -> dict | None:
+        """把本地附件登记成一次性 URL，交给 DSH 自己下载。
+
+        `inbound_url_mode`：`auto`（默认）= 只对超过 base64 上限的附件走 URL；
+        `always` = 所有附件都走 URL（完全不依赖共享目录）；`off` = 关闭。
+        任何一步失败/未配置都返回 None，由调用方回退原有的共享目录 / base64。
+        """
+        base = self._inbound_url_base()
+        if not base or not local:
+            return None
+        mode = str(self._cfg("inbound_url_mode", "auto") or "auto").strip().lower()
+        if mode in {"off", "never", "false", "0", "no", "none"}:
+            return None
+        try:
+            size = Path(local).stat().st_size
+        except OSError:
+            return None
+        if mode != "always" and size <= INBOUND_BASE64_LIMIT:
+            return None
+        if size > self._inbound_url_limit():
+            return None  # 太大：交给后面的 too_big 提示，别让 DSH 白下一遍
+        try:
+            # AstrBot 把单例挂在包里（`astrbot/core/__init__.py: file_token_service = FileTokenService()`）
+            from astrbot.core import file_token_service
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("AstrBot 文件服务不可用（%s），回退共享目录 / base64", exc)
+            return None
+        try:
+            token = await file_token_service.register_file(str(local))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("登记入站 URL 失败（%s），回退共享目录 / base64", exc)
+            return None
+        return {"kind": kind, "name": name, "size": size, "url": f"{base}/api/file/{token}"}
+
     async def _collect_files(self, event: AstrMessageEvent) -> list[dict]:
         out: list[dict] = []
         umo = self._convo_key(event)
@@ -289,12 +340,16 @@ class DshBridgePlugin(Star):
                 if isinstance(seg, Video):
                     local = await seg.convert_to_file_path()
                     name = Path(local).name or "video.mp4"
+                    entry = await self._maybe_url_entry(local, name, "video")
+                    if entry:
+                        out.append(entry)
+                        continue
                     staged = self._stage_inbound(Path(local), name, umo)
                     if staged:
                         out.append({"kind": "video", "name": name, "path": staged[0], "_staged": staged[1]})
                         continue
                     data = Path(local).read_bytes()
-                    if len(data) > 12 * 1024 * 1024:
+                    if len(data) > INBOUND_BASE64_LIMIT:
                         out.append({"kind": "video", "name": name, "too_big": True})
                         continue
                     out.append({
@@ -305,12 +360,16 @@ class DshBridgePlugin(Star):
                 elif isinstance(seg, Image):
                     local = await seg.convert_to_file_path()
                     name = Path(local).name or "image.png"
+                    entry = await self._maybe_url_entry(local, name, "image")
+                    if entry:
+                        out.append(entry)
+                        continue
                     staged = self._stage_inbound(Path(local), name, umo)
                     if staged:
                         out.append({"kind": "image", "name": name, "path": staged[0], "_staged": staged[1]})
                         continue
                     data = Path(local).read_bytes()
-                    if len(data) > 12 * 1024 * 1024:
+                    if len(data) > INBOUND_BASE64_LIMIT:
                         out.append({"kind": "image", "name": name, "too_big": True})
                         continue
                     out.append({
@@ -334,6 +393,12 @@ class DshBridgePlugin(Star):
                         continue
                     name = str(seg.name or Path(local).name or "file")
                     is_url = local.startswith("http://") or local.startswith("https://")
+                    if not is_url:
+                        # 本地文件：大文件可以登记成一次性 URL 让 DSH 自己来取
+                        entry = await self._maybe_url_entry(local, name, "file")
+                        if entry:
+                            out.append(entry)
+                            continue
                     staged = (
                         await self._download_to_share(local, name, umo) if is_url
                         else self._stage_inbound(Path(local), name, umo)
@@ -348,7 +413,7 @@ class DshBridgePlugin(Star):
                             data = resp.content
                     else:
                         data = Path(local).read_bytes()
-                    if len(data) > 12 * 1024 * 1024:
+                    if len(data) > INBOUND_BASE64_LIMIT:
                         out.append({"kind": "file", "name": name, "too_big": True})
                         continue
                     out.append({
@@ -781,8 +846,12 @@ class DshBridgePlugin(Star):
         too_big = [f.get("name") or "文件" for f in files if f.get("too_big")]
         files = [f for f in files if not f.get("too_big")]
         if too_big:
+            if self._inbound_url_base():
+                url_hint = "，或把 inbound_url_max_mb 调大（URL 入站的上限）"
+            else:
+                url_hint = "，或者填 inbound_url_base 走 URL 入站（不用挂共享盘，需要 DSH 能访问到 AstrBot 的 HTTP）"
             share_hint = "" if self._cfg("inbound_share_dir", "") else "，或在插件配置里填 inbound_share_dir / inbound_dsh_prefix 走共享目录"
-            yield "附件太大没能传过去（超过 12MB）：" + "、".join(too_big) + share_hint + "。"
+            yield "附件太大没能传过去（超过 12MB）：" + "、".join(too_big) + share_hint + url_hint + "。"
         if missing:
             yield "引用的文件没能下载（群文件/过期链接常见）：" + "、".join(missing) + "。请把文件当聊天附件发出，或同一条消息里带 /dsh。"
         # 共享目录里的暂存副本：ingress 读完这轮就删，别一直堆着

@@ -57,6 +57,9 @@ QQ ──OneBot──▶ AstrBot（本插件）──HTTP──▶ DSH :3188 ─
 | `send_inline_videos` | 开 | mp4/mov/avi/mkv/webm 用视频消息发，失败回退文件卡片 |
 | `inbound_share_dir` | 空 | 入站大文件（>12MB）暂存目录（AstrBot 侧路径）。**同机部署留空即可**，会自动用 DSH 工作区下的 `.dsh-inbox`；分容器才要填，如 `/mnt/d/proj/.dsh-inbox` |
 | `inbound_dsh_prefix` | 空 | 同一目录在 DSH 侧的写法，如 `D:\proj\.dsh-inbox` |
+| `inbound_url_base` | 空 = 关 | **URL 入站**：DSH 能访问到的 AstrBot 基址，如 `http://127.0.0.1:10000`（**宿主机的端口**，不是容器里的 6185）。填了它大附件就不用挂共享盘 |
+| `inbound_url_mode` | `auto` | `auto` = 只有超过 12MB 的附件走 URL；`always` = 所有附件都走 URL（完全不依赖共享目录）；`off` = 关 |
+| `inbound_url_max_mb` | 200 | URL 入站的单文件上限（DSH 侧 `inboundUrlMaxMb` 也要够） |
 | `official_send_mode` | `passive-first` | 官方 QQ 机器人的发送方式，见下 |
 
 ### 官方 QQ 机器人的发送方式
@@ -101,6 +104,23 @@ D:\proj\.dsh-inbox  ⇄   /mnt/d/proj/.dsh-inbox    —                     入�
 |---|---|
 | `send_file_mode` | `direct` |
 | `inbound_share_dir` / `inbound_dsh_prefix` | 留空（≤12MB 走 base64；更大的自动落到 `<工作区>/.dsh-inbox`） |
+
+### 不挂共享盘：URL 入站（Docker 尤其有用）
+
+填 `inbound_url_base` 后，附件不再经 base64 或共享目录，而是由插件登记成**一次性 URL**
+（AstrBot 的 `/api/file/<token>`，默认 5 分钟有效、不需要登录态），DSH 自己去下载并落进
+`<工作区>/.dsh-inbox/`：
+
+| 项 | 值 |
+|---|---|
+| `inbound_url_base` | **DSH 那台机器**能访问到的 AstrBot 地址。例：`http://127.0.0.1:10000`（`docker port` 里 6185 映射到的宿主端口），或局域网 IP `http://192.168.1.5:10000` |
+| `inbound_url_mode` | `auto`（默认，>12MB 才走 URL）/ `always`（全走，彻底不要共享目录）/ `off` |
+| `inbound_url_max_mb` | 默认 200；DSH 侧 `inboundUrlMaxMb` 也要够 |
+
+- **别照抄 `callback_api_base`**：那是给协议端看的（Docker 里常是 `http://astrbot:6185`），
+  宿主机上的 DSH 解析不了 —— 所以这里要填「宿主视角」的地址。
+- 失败会自动回退：URL 拿不到 → 共享目录 → base64 → 最后才是「太大」提示。
+- 出站不受影响（出站走的还是共享目录 / 回调 URL，见下）。
 
 ### AstrBot 与协议端分容器（Docker）
 

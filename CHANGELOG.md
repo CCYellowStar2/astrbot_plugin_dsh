@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.3 — 2026-09-12
+
+### 新增
+
+- **URL 入站**：Docker 部署可以不再挂共享盘。插件把附件登记成 AstrBot 的**一次性 URL**
+  （`{inbound_url_base}/api/file/<token>`，token 默认 5 分钟、免登录），ingress 自己流式下载进
+  `cwd/.dsh-inbox/`。
+  - `inbound_url_base`：**DSH 视角**能访问到的 AstrBot 地址（例：`docker port` 里 6185 映射到的宿主端口
+    `http://127.0.0.1:10000`）。**别照抄 `callback_api_base`** —— 那是容器内地址，宿主机解析不了。
+  - `inbound_url_mode`：`auto`（默认，只有 >12MB 才走 URL）/ `always`（全走，彻底不要共享目录）/ `off`。
+  - `inbound_url_max_mb`：单文件上限（默认 200）；DSH 侧另有 `inboundUrlMaxMb` / `inboundUrlTimeoutMs`。
+  - ingress 侧 `lib/fetchfile.js`：流式落盘 + 边下边计数（超限立即中断并删半截文件）+ 超时 + 失败清干净，
+    带单测（正常 / 超限 / 404 / 超时 / 非 http / 缺 fetch）。
+  - 回退链不变：URL 失败 / 未配 base / 超上限 → 共享目录 → base64 → 「太大」提示。
+
 ## 0.3.2 — 2026-09-12
 
 ### 修复
