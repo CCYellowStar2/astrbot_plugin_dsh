@@ -341,6 +341,31 @@ class DshBridgePlugin(Star):
                 out.append(text)
         return out
 
+    async def _probe_via_ingress(self, probe_url: str) -> dict:
+        """请 ingress 去取一次 probe_url，返回它的判定（ok/status/bytes/error/ms）。
+
+        ⚠️ 必须用 **AsyncClient**：这个方法跑在 AstrBot 的事件循环里，而 ingress 探测要取的
+        `/api/file/<token>` 正是**同一个进程的 dashboard** 在提供 —— 用同步 client 会阻塞循环，
+        变成「我等自己」的死锁，探测必然超时（2026-09-12 实测踩到：真 token 探测稳稳 5 秒超时）。
+        """
+        url, bearer, _ = self._ingress_target()
+        try:
+            async with httpx.AsyncClient(timeout=12.0, trust_env=False) as client:
+                r = await client.get(
+                    f"{url}/probe-url",
+                    params={"url": probe_url},
+                    headers={"Authorization": f"Bearer {bearer}"},
+                )
+                if r.status_code != 200:
+                    return {
+                        "ok": False,
+                        "stage": "ingress",
+                        "error": f"/probe-url HTTP {r.status_code}: {r.text[:120]}",
+                    }
+                return r.json()
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "stage": "ingress", "error": str(exc)}
+
     async def _probe_inbound_base(self, base: str, local: str) -> bool:
         """让 ingress 用一次性 token 试着取一次：能不能取到，才代表这个 base 真的可用。"""
         try:
@@ -351,21 +376,22 @@ class DshBridgePlugin(Star):
         except Exception as exc:  # noqa: BLE001
             logger.warning("AstrBot 文件服务不可用（%s），回退共享目录 / base64", exc)
             return False
-        url, bearer, _ = self._ingress_target()
-        try:
-            with httpx.Client(timeout=8.0, trust_env=False) as client:
-                r = client.get(
-                    f"{url}/probe-url",
-                    params={"url": f"{base}/api/file/{token}"},
-                    headers={"Authorization": f"Bearer {bearer}"},
-                )
-                if r.status_code != 200:
-                    return False
-                payload = r.json()
-                return bool(payload.get("ok"))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("探测 %s 失败：%s", base, exc)
-            return False
+        real = await self._probe_via_ingress(f"{base}/api/file/{token}")
+        if real.get("ok"):
+            return True
+        # 再用一个假 token 探一次，把「宿主不可达」和「token 不被接受」分开
+        bogus = await self._probe_via_ingress(f"{base}/api/file/00000000-0000-0000-0000-000000000000")
+        logger.info(
+            "[dsh] 候选 %s 探测未通过：真 token -> status=%s bytes=%s ms=%s err=%s；假 token -> status=%s err=%s",
+            base,
+            real.get("status"),
+            real.get("bytes"),
+            real.get("ms"),
+            real.get("error") or "-",
+            bogus.get("status"),
+            bogus.get("error") or "-",
+        )
+        return False
 
     async def _resolve_inbound_base(self, local: str) -> str | None:
         """挑一个 DSH 真能访问到的 base；结果（含失败）缓存 `_INBOUND_URL_PICK_TTL` 秒。"""

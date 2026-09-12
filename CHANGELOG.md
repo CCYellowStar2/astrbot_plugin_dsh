@@ -1,5 +1,15 @@
 # Changelog
 
+## 未发布
+
+### 修复
+
+- **URL 入站的探测死锁**：`_probe_via_ingress` 用了同步 `httpx.Client`，而它跑在 AstrBot 的事件循环里、
+  要请求的 `/api/file/<token>` 又是**同一个进程的 dashboard** 提供的 —— 于是「我等我自己」，真 token 探测
+  每次都卡满 5 秒超时（日志还误报成「候选不可达」），结果永远回退到共享目录 / base64。改用
+  `httpx.AsyncClient` 即可。同时把探测失败的日志拆细：真 token 与假 token 各探一次，
+  能区分「宿主不可达」与「token 不被接受」。
+
 ## 0.3.4 — 2026-09-12
 
 ### 新增
