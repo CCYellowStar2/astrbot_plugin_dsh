@@ -108,7 +108,7 @@ def _as_str_list(value: Any) -> list[str]:
     "astrbot_plugin_dsh",
     "local",
     "把指定会话转发给本机 DeepSeek Harness，不接管日常聊天",
-    "0.3.5",
+    "0.3.6",
 )
 class DshBridgePlugin(Star):
     # DSH 出站文本的隐藏标记（两个零宽空格）：QQ 里看不见，人格回复不会带。
@@ -116,6 +116,8 @@ class DshBridgePlugin(Star):
     OUTBOUND_TAG = "\u200b\u200b"
     # URL 入站选中的 base 缓存多久（含失败结果，避免每条消息都扫一遍候选）
     _INBOUND_URL_PICK_TTL = 600.0
+    # ingress 地址探测结果的缓存时长
+    _INGRESS_PICK_TTL = 300.0
 
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -132,6 +134,8 @@ class DshBridgePlugin(Star):
         self._beacon_logged = False
         # (时间, 选中的 URL 入站 base)：None 表示「探测过、都不通」
         self._inbound_url_pick: tuple[float, str | None] = (0.0, None)
+        # (时间, 探测到的 ingress 地址)：没配 ingress_url 且无信标时用
+        self._ingress_pick: tuple[float, str | None] = (0.0, None)
         # 候选都不通时，在聊天里提醒一次就够
         self._url_hint_needed = False
         self._url_hint_shown = False
@@ -821,8 +825,44 @@ class DshBridgePlugin(Star):
                 pass
         return result
 
+    def _ingress_candidates(self) -> list[str]:
+        """没配 `ingress_url`、也没有信标时（典型：Docker 里读不到宿主机 home）的候选地址。"""
+        out: list[str] = ["http://host.docker.internal:3188", "http://127.0.0.1:3188"]
+        for item in _as_str_list(self._cfg("ingress_url_candidates", [])):
+            text = item.strip().rstrip("/")
+            if not text:
+                continue
+            if text.isdigit():
+                text = f"http://127.0.0.1:{text}"
+            elif not text.startswith(("http://", "https://")):
+                text = f"http://{text}"
+            if text not in out:
+                out.append(text)
+        return out
+
+    async def _ensure_ingress_pick(self) -> None:
+        """探测哪个 ingress 地址能用——`/health` 不需要 token，正好用来试探。"""
+        if str(self._cfg("ingress_url", "") or "").strip():
+            return
+        now = time.time()
+        picked_at, _ = self._ingress_pick
+        if picked_at and now - picked_at < self._INGRESS_PICK_TTL:
+            return
+        for cand in self._ingress_candidates():
+            try:
+                async with httpx.AsyncClient(timeout=3.0, trust_env=False) as client:
+                    r = await client.get(f"{cand}/health")
+                    if r.status_code == 200 and (r.json() or {}).get("plugin"):
+                        self._ingress_pick = (now, cand)
+                        logger.info("[dsh] ingress 地址选中 %s（/health 探测通过）", cand)
+                        return
+            except Exception:  # noqa: BLE001
+                continue
+        self._ingress_pick = (now, None)
+        logger.warning("[dsh] 没探测到可用的 ingress 地址，候选：%s", "、".join(self._ingress_candidates()))
+
     def _ingress_target(self) -> tuple[str, str, str]:
-        """(base_url, token, 来源)。配置留空时用同机 ingress 的信标兜底。"""
+        """(base_url, token, 来源)。留空时依次用：信标 → 候选探测结果 → 候选第一项。"""
         url = str(self._cfg("ingress_url", "") or "").strip().rstrip("/")
         token = str(self._cfg("token", "") or "").strip()
         source = "config"
@@ -843,7 +883,11 @@ class DshBridgePlugin(Star):
                         beacon.get("version") or "?",
                     )
         if not url:
-            url = "http://127.0.0.1:3188"
+            _, picked = self._ingress_pick
+            if picked:
+                url, source = picked, "probe"
+            else:
+                url, source = self._ingress_candidates()[0], "default"
         return url, token, source
 
     def _cfg(self, key: str, default: Any) -> Any:
@@ -940,6 +984,8 @@ class DshBridgePlugin(Star):
         return False, ""
 
     async def _forward(self, event: AstrMessageEvent, text: str) -> AsyncIterator[str]:
+        # 没配地址也没信标时，先探一个能用的（Docker 里 host.docker.internal:3188 是常态）
+        await self._ensure_ingress_pick()
         url, token, _source = self._ingress_target()
         timeout = float(self._cfg("timeout_sec", 600) or 600)
         if not token:
@@ -1314,51 +1360,122 @@ class DshBridgePlugin(Star):
             text.replace("\n", " ⏎ ")[:60],
         )
 
+    async def _pull_outbound(self, host_path: str, file_name: str, event: AstrMessageEvent) -> Path | None:
+        """本地看不见这个文件时，向 ingress 要一张一次性凭证，自己把它拉过来。
+
+        Docker 里 AstrBot 只挂了 `./data` 时，DSH 产出的文件它根本看不见 —— 这条兜底让
+        「出站文件」也不再要求挂载 DSH 的盘。凭证由 ingress **按 umo 的工作区**签发，
+        所以工作区外 / 敏感路径的校验不会因为走网络而放松。
+        """
+        if str(self._cfg("outbound_pull", True)).strip().lower() in {"off", "false", "0", "no", "none"}:
+            return None
+        try:
+            limit_mb = float(self._cfg("outbound_pull_max_mb", 200) or 200)
+        except (TypeError, ValueError):
+            limit_mb = 200.0
+        limit = int(max(1.0, limit_mb) * 1024 * 1024)
+        url, bearer, _ = self._ingress_target()
+        if not bearer:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=20.0, trust_env=False) as client:
+                r = await client.post(
+                    f"{url}/file-token",
+                    json={"path": host_path, "umo": self._convo_key(event)},
+                    headers={"Authorization": f"Bearer {bearer}"},
+                )
+                if r.status_code != 200:
+                    logger.info("[dsh] 取拉取凭证失败（HTTP %s）：%s", r.status_code, r.text[:160])
+                    return None
+                payload = r.json() or {}
+                token = str(payload.get("token") or "")
+                size = int(payload.get("size") or 0)
+                if not token or size > limit:
+                    if size > limit:
+                        logger.info("[dsh] 文件 %s 超过拉取上限（%s > %s）", file_name, size, limit)
+                    return None
+                dest_dir = Path("/AstrBot/data/temp") if Path("/AstrBot/data").exists() else Path("data/temp")
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                dest = dest_dir / f"dsh-pull-{int(time.time() * 1000)}-{file_name}"
+                written = 0
+                async with client.stream(
+                    "GET", f"{url}/file/{token}", headers={"Authorization": f"Bearer {bearer}"}
+                ) as resp:
+                    resp.raise_for_status()
+                    with dest.open("wb") as fh:
+                        async for chunk in resp.aiter_bytes():
+                            written += len(chunk)
+                            if written > limit:
+                                raise RuntimeError("超过拉取上限")
+                            fh.write(chunk)
+            logger.info("[dsh] 出站文件从 ingress 拉取成功：%s（%d B）", file_name, written)
+            return dest
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[dsh] 拉取出站文件失败 %s：%s", file_name, exc)
+            return None
+
+    async def _send_outbound_file(self, event: AstrMessageEvent, src: Path, file_name: str) -> AsyncIterator[str]:
+        """把本地文件发出去：图片走 Image 段、视频走 Video、其余走 File。"""
+        try:
+            size = src.stat().st_size
+        except OSError:
+            size = 0
+        # 图片走 Image 段（AstrBot 自己 base64 上传），QQ 里直接显示，
+        # 也不再需要协议端能读到的共享目录。
+        if self._is_inline_image(file_name, size):
+            try:
+                await self._deliver(event, event.chain_result([Image.fromFileSystem(str(src))]))
+            except Exception as exc:
+                logger.warning("send image failed: %s", exc)
+                yield f"发送图片失败：{file_name}（{exc}）"
+            return
+        send_path = str(src)
+        if self._send_mode(event) == "shared":
+            try:
+                staged, err = self._stage_for_protocol(src, file_name)
+            except OSError as exc:
+                logger.warning("copy to protocol outbox failed: %s", exc)
+                yield f"拷到协议端目录失败：{file_name}（{exc}）"
+                return
+            if err or not staged:
+                yield f"{err or '无法把文件交给协议端'}：{file_name}"
+                return
+            send_path = staged
+        if self._is_video_delivery(file_name):
+            try:
+                await self._deliver(event, event.chain_result([Video(file=send_path)]))
+                return
+            except Exception as exc:
+                logger.warning("send video failed, fallback to file: %s", exc)
+        try:
+            await self._deliver(event, event.chain_result([File(name=file_name, file=send_path)]))
+        except Exception as exc:
+            logger.warning("send file failed: %s", exc)
+            yield f"发送文件失败：{file_name}（{exc}）"
+
     async def _emit_sse(self, event: AstrMessageEvent, data: dict) -> AsyncIterator[str]:
         name = str(data.get("_event") or "message")
         if name == "file":
             host_path = str(data.get("path") or "")
             file_name = Path(str(data.get("name") or Path(host_path).name or "file")).name
             src = self._resolve_local_file(host_path)
+            pulled: Path | None = None
             if src is None:
-                yield f"要发的文件找不到：{file_name}"
+                # 容器里看不见 DSH 的文件（典型：只挂了 ./data）→ 从 ingress 拉一份过来
+                pulled = await self._pull_outbound(host_path, file_name, event)
+                src = pulled
+            if src is None:
+                yield f"要发的文件取不到：{file_name}（AstrBot 这边看不到该路径，从 ingress 拉取也没成功）"
                 return
             try:
-                size = src.stat().st_size
-            except OSError:
-                size = 0
-            # 图片走 Image 段（AstrBot 自己 base64 上传），QQ 里直接显示，
-            # 也不再需要协议端能读到的共享目录。
-            if self._is_inline_image(file_name, size):
-                try:
-                    await self._deliver(event, event.chain_result([Image.fromFileSystem(str(src))]))
-                except Exception as exc:
-                    logger.warning("send image failed: %s", exc)
-                    yield f"发送图片失败：{file_name}（{exc}）"
-                return
-            send_path = str(src)
-            if self._send_mode(event) == "shared":
-                try:
-                    staged, err = self._stage_for_protocol(src, file_name)
-                except OSError as exc:
-                    logger.warning("copy to protocol outbox failed: %s", exc)
-                    yield f"拷到协议端目录失败：{file_name}（{exc}）"
-                    return
-                if err or not staged:
-                    yield f"{err or '无法把文件交给协议端'}：{file_name}"
-                    return
-                send_path = staged
-            if self._is_video_delivery(file_name):
-                try:
-                    await self._deliver(event, event.chain_result([Video(file=send_path)]))
-                    return
-                except Exception as exc:
-                    logger.warning("send video failed, fallback to file: %s", exc)
-            try:
-                await self._deliver(event, event.chain_result([File(name=file_name, file=send_path)]))
-            except Exception as exc:
-                logger.warning("send file failed: %s", exc)
-                yield f"发送文件失败：{file_name}（{exc}）"
+                async for item in self._send_outbound_file(event, src, file_name):
+                    yield item
+            finally:
+                if pulled is not None:
+                    try:
+                        pulled.unlink(missing_ok=True)
+                    except OSError:
+                        pass
             return
         text_out = str(data.get("text") or data.get("message") or "")
         if name in {"text", "approval", "status", "error", "question"} and text_out:

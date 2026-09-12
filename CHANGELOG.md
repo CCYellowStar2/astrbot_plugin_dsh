@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.6 — 2026-09-12
+
+### 新增
+
+- **出站文件的「拉取兜底」**：出站文件过去要求 AstrBot 能直接读到源文件（`D:\x` → `/mnt/d/x` 的挂载
+  约定），Docker 官方 compose 只挂 `./data` 时根本读不到。现在：
+  1. 先照旧试本地路径（挂了盘的用户零开销）；
+  2. 看不到 → `POST /file-token`（Bearer，带 `{path, umo}`），ingress 按**该会话的工作区**校验
+     （工作区外 / 敏感路径照旧拒绝）并签发**一次性、120 秒有效**的凭证；
+  3. 插件 `GET {ingress_url}/file/<token>` 流式拉到自己的 `data/temp/` → 按原逻辑发出 → 用完删掉。
+  配置：`outbound_pull`（默认开）/ `outbound_pull_max_mb`（默认 200）；DSH 侧 `outboundUrlMaxMb`。
+- **ingress 地址也做成候选**：`ingress_url` 留空时依次用 信标 → `host.docker.internal:3188` →
+  `127.0.0.1:3188` → `ingress_url_candidates`，用 `/health`（无需 token）探一遍取第一个通的，
+  结果缓存 300 秒。**Docker 部署于是只剩 `token` 一个必填字段。**
+- `/file-token`、`/file/<token>` 两个路由都走同一套 Bearer 鉴权；凭证一次性、过期即废。
+
 ## 0.3.5 — 2026-09-12
 
 ### 修复

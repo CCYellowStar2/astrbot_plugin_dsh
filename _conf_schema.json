@@ -10,6 +10,18 @@
     "type": "string",
     "default": ""
   },
+  "ingress_url": {
+    "description": "DSH ingress 地址（留空 = 自动）",
+    "hint": "留空时依次尝试：同机信标文件（~/.dsh/astrbot-ingress.json）→ 候选探测（host.docker.internal:3188 → 127.0.0.1:3188 → 下面的候选列表）。Docker 部署通常留空就够（走 host.docker.internal）；非默认端口或特殊网络再手填。",
+    "type": "string",
+    "default": ""
+  },
+  "ingress_url_candidates": {
+    "description": "ingress 地址的额外候选（留空 = 只用内置两个）",
+    "hint": "每行一个：完整地址（http://192.168.1.5:3188）或裸端口（3188）。留空时内置候选是 host.docker.internal:3188 与 127.0.0.1:3188，插件会用 /health 探一遍、第一个通的才用。",
+    "type": "list",
+    "default": []
+  },
   "token": {
     "description": "与 DSH ingress 相同的 Bearer token（留空 = 同机自动发现）",
     "hint": "同机部署留空即可，从上面的信标文件里读。容器部署要手填：token 在宿主机 %DSH_HOME%/dsh-astrbot-ingress/config.json。",
@@ -85,6 +97,18 @@
     "hint": "每行一个：完整地址（http://127.0.0.1:10000）或裸端口（10000）。AstrBot 在 Docker 里看不到宿主把 6185 映射成了哪个端口，所以要把宿主端口列在这里；插件会让 DSH 侧真的取一次来确认，第一个通的才用，都不通时会在聊天里提醒一次。",
     "type": "list",
     "default": []
+  },
+  "outbound_pull": {
+    "description": "出站文件兜底：本地看不到时从 ingress 拉",
+    "hint": "打开后，DSH 要发的文件如果 AstrBot 这边（容器里）看不到，插件会向 ingress 要一张一次性凭证、自己把文件拉过来再发。**Docker 官方 compose（只挂 ./data）下，这就是「出站文件不用挂盘」的那条路**。工作区外与敏感路径的校验照旧（凭证按会话工作区签发）。",
+    "type": "bool",
+    "default": true
+  },
+  "outbound_pull_max_mb": {
+    "description": "出站拉取的单文件上限（MB）",
+    "hint": "超过就不拉（回退到「AstrBot 这边看不到文件」的提示）。DSH 侧还有 ingress 的 outboundUrlMaxMb（默认 200）。",
+    "type": "int",
+    "default": 200
   },
   "session_scope": {
     "description": "群里谁和谁共用一条 DSH 会话",

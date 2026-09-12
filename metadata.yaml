@@ -11,7 +11,7 @@ desc: |
   - 审批和提问可以在聊天里直接回复（也可以继续在网页端点）
 
   使用前需要先在电脑上装好 DSH，并启用 `dsh-astrbot-ingress` 入站插件。
-version: 0.3.5
+version: 0.3.6
 author: CCYellowStar2
 repo: "https://github.com/CCYellowStar2/astrbot_plugin_dsh"
 astrbot_version: ">=4.16"

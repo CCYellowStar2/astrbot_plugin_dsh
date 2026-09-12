@@ -57,6 +57,9 @@ QQ ──OneBot──▶ AstrBot（本插件）──HTTP──▶ DSH :3188 ─
 | `send_inline_videos` | 开 | mp4/mov/avi/mkv/webm 用视频消息发，失败回退文件卡片 |
 | `inbound_share_dir` | 空 | 入站大文件（>12MB）暂存目录（AstrBot 侧路径）。**同机部署留空即可**，会自动用 DSH 工作区下的 `.dsh-inbox`；分容器才要填，如 `/mnt/d/proj/.dsh-inbox` |
 | `inbound_dsh_prefix` | 空 | 同一目录在 DSH 侧的写法，如 `D:\proj\.dsh-inbox` |
+| `ingress_url_candidates` | 空 | ingress 地址的额外候选（完整地址或裸端口）。留空时内置 `host.docker.internal:3188` 与 `127.0.0.1:3188`，用 `/health` 探一遍取第一个通的 |
+| `outbound_pull` | 开 | **出站兜底**：DSH 要发的文件如果 AstrBot 这边（容器里）看不到，就向 ingress 要一次性凭证自己拉过来再发 —— Docker 官方 compose 下出站文件因此不用挂盘 |
+| `outbound_pull_max_mb` | 200 | 出站拉取的单文件上限（DSH 侧还有 `outboundUrlMaxMb`） |
 | `inbound_url_base` | 空 = 自动候选 | **URL 入站**：DSH 能访问到的 AstrBot 基址，如 `http://127.0.0.1:10000`（**宿主机的端口**，不是容器里的 6185）。留空则自动探测候选 |
 | `inbound_url_candidates` | 空 | 候选地址（每行一个完整地址或裸端口）。Docker 下把宿主机映射的端口列进来，插件会让 DSH 侧先探一次 |
 | `inbound_url_mode` | `auto` | `auto` = 只有超过 12MB 的附件走 URL；`always` = 所有附件都走 URL（完全不依赖共享目录）；`off` = 关 |
