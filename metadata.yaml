@@ -1,0 +1,13 @@
+name: astrbot_plugin_dsh
+display_name: DSH 桥
+desc: 把指定会话转发给本机 DeepSeek Harness（写代码 / 跑工具），不接管 AstrBot 日常聊天
+version: v0.2.0
+author: CCYellowStar2
+repo: "https://github.com/CCYellowStar2/astrbot_plugin_dsh"
+astrbot_version: ">=4.16"
+support_platforms:
+  - aiocqhttp
+  - qq_official
+  - telegram
+  - lark
+  - wecom

@@ -1,0 +1,139 @@
+{
+  "enabled": {
+    "description": "启用 DSH 桥",
+    "type": "bool",
+    "default": true
+  },
+  "ingress_url": {
+    "description": "DSH ingress 地址",
+    "hint": "同机填 http://127.0.0.1:3188；AstrBot 在 Docker 填 http://host.docker.internal:3188",
+    "type": "string",
+    "default": "http://127.0.0.1:3188"
+  },
+  "token": {
+    "description": "与 DSH ingress 相同的 Bearer token",
+    "hint": "在宿主机 %DSH_HOME%/dsh-astrbot-ingress/config.json 里复制 token",
+    "type": "string",
+    "default": ""
+  },
+  "command": {
+    "description": "进入 DSH 的命令前缀（不含斜杠）",
+    "hint": "例如 dsh → /dsh 帮我改代码。私聊可另外打开「私聊整段转发」。",
+    "type": "string",
+    "default": "dsh"
+  },
+  "private_passthrough": {
+    "description": "私聊整段转发到 DSH",
+    "hint": "打开后，私聊不再走 AstrBot 人格，全部交给 DSH。群聊仍需 /dsh 或白名单。",
+    "type": "bool",
+    "default": false
+  },
+  "allow_users": {
+    "description": "允许使用 DSH 的 QQ 号 / 用户 ID",
+    "hint": "空 = 仅管理员可用。私聊里名单外的人不会再收到拒绝提示，而是照常交给 AstrBot 人格；群聊里名单外发 /dsh 会得到一句说明。",
+    "type": "list",
+    "items": { "type": "string" },
+    "default": []
+  },
+  "allow_groups": {
+    "description": "允许使用 DSH 的群号",
+    "hint": "空 = 群聊一律不转发，除非发送者是管理员且用了 /dsh。",
+    "type": "list",
+    "items": { "type": "string" },
+    "default": []
+  },
+  "timeout_sec": {
+    "description": "无输出多久算超时（秒）",
+    "type": "int",
+    "hint": "按空闲时间算，不是整轮总时长：DSH 还在发心跳/结果就一直等。代码任务建议 600 以上。",
+    "default": 600
+  },
+  "progress_mode": {
+    "description": "过程显示方式",
+    "hint": "digest=过程攒着定期汇报（推荐）；full=实时发思考首行与工具行；minimal=过程不出声。三档都照发结果、文件、报错、权限确认与「—— 本回合结束」。",
+    "type": "string",
+    "options": ["digest", "full", "minimal"],
+    "default": "digest"
+  },
+  "progress_interval_sec": {
+    "description": "过程汇报间隔（秒）",
+    "hint": "10-300，只在 digest 档生效，且必须小于上面的 timeout_sec（这条汇报同时充当保活心跳）。",
+    "type": "int",
+    "default": 60
+  },
+  "session_scope": {
+    "description": "群里谁和谁共用一条 DSH 会话",
+    "hint": "group=一个群共用一条（默认）。user=群里每人一条（各自独立的上下文/工作区/模型/权限）；想共用的人各自 /dsh use <同一个短id> 组队。切换后原群会话闲置，自己也要 /dsh use 接回来。回复仍发在群里 —— 隔离的是上下文，不是隐私。",
+    "type": "string",
+    "options": ["group", "user"],
+    "default": "group"
+  },
+  "quote_continue": {
+    "description": "引用机器人的 DSH 回复时继续当前会话",
+    "hint": "打开后，引用 DSH 的回复即可续聊，不必每句 /dsh；引用别人或人格的消息不会走 DSH。官方 QQ 机器人同样支持（含被引的图/文件）。",
+    "type": "bool",
+    "default": true
+  },
+  "official_at_continue": {
+    "description": "官方群聊里 @ 机器人即续聊",
+    "hint": "官方 QQ 群聊只有被 @ 才会收到消息。打开后，已绑定 DSH 的会话里 @ 机器人直接说话就是续聊；没 @ 的闲聊不会进 DSH。",
+    "type": "bool",
+    "default": true
+  },
+  "bound_media_passthrough": {
+    "description": "已绑定 DSH 的会话里，直接发的图/文件/视频也交给 DSH",
+    "hint": "这个群已经 /dsh 过之后，再单独发图片、聊天附件或视频会进当前 DSH 会话，不必引用或再打 /dsh。未绑定的群不受影响。",
+    "type": "bool",
+    "default": true
+  },
+  "inbound_share_dir": {
+    "description": "入站大文件暂存目录（AstrBot 侧）",
+    "hint": "大文件（>12MB）走路径而不是 base64，所以要填一个 AstrBot 能写、DSH 也看得到的目录，如 /mnt/d/proj/.dsh-inbox。**同机部署（AstrBot 不在容器里）留空即可** —— 会自动用 DSH 当前工作区下的 .dsh-inbox。",
+    "type": "string",
+    "default": ""
+  },
+  "inbound_dsh_prefix": {
+    "description": "DSH 侧看到的同一目录",
+    "hint": "仅分容器时填：与 inbound_share_dir 是同一块盘的两个视角（AstrBot 写 /mnt/d/proj/.dsh-inbox，DSH 读 D:\\proj\\.dsh-inbox）。同机留空 —— 两边是同一个路径。",
+    "type": "string",
+    "default": ""
+  },
+  "send_file_mode": {
+    "description": "把 DSH 文件发给 QQ 的方式",
+    "hint": "auto=能找到协议端可读目录就拷过去，否则直接发原路径（推荐）。direct=同机直装，不拷贝。shared=先拷到协议端能读的目录再发。",
+    "type": "string",
+    "options": ["auto", "direct", "shared"],
+    "default": "auto"
+  },
+  "send_inline_images": {
+    "description": "图片直接内联显示（不用文件卡片）",
+    "hint": "打开后，png/jpg/gif/webp/bmp 且不超过 5MB 的文件会用图片消息发出，QQ 里可直接看。关掉则一律按文件发。",
+    "type": "bool",
+    "default": true
+  },
+  "send_inline_videos": {
+    "description": "视频用视频消息发（不用文件卡片）",
+    "hint": "打开后，mp4/mov/avi/mkv/webm 用视频消息发出，QQ 里可直接播放；失败会自动回退成文件卡片。QQ 对视频格式（一般 mp4/H.264）和大小有限制。",
+    "type": "bool",
+    "default": true
+  },
+  "official_send_mode": {
+    "description": "官方 QQ 机器人用被动还是主动消息",
+    "hint": "被动回复限「同一会话 5 分钟最多 5 次」（40034128）。passive-first=首条被动、之后转主动（默认）；proactive=全主动；passive=全被动。主动消息需在开放平台给该群开启「主动通知」，否则报 40034105。",
+    "type": "string",
+    "options": ["passive-first", "proactive", "passive"],
+    "default": "passive-first"
+  },
+  "send_outbox_dir": {
+    "description": "AstrBot 能写的发件目录",
+    "hint": "仅当 AstrBot 写不了 send_protocol_path 时填：同一块盘上 AstrBot 自己的挂载点。两边挂载点同名时留空。",
+    "type": "string",
+    "default": ""
+  },
+  "send_protocol_path": {
+    "description": "协议端（NapCat/SnowLuma）能读的发件目录",
+    "hint": "填协议端容器里的目录，如 /app/napcat/data/dsh-outbox。AstrBot 也能写这里时，文件会直接拷到这里再发。",
+    "type": "string",
+    "default": ""
+  }
+}
