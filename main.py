@@ -108,7 +108,7 @@ def _as_str_list(value: Any) -> list[str]:
     "astrbot_plugin_dsh",
     "local",
     "把指定会话转发给本机 DeepSeek Harness，不接管日常聊天",
-    "0.3.12",
+    "0.3.13",
 )
 class DshBridgePlugin(Star):
     # DSH 出站文本的隐藏标记（两个零宽空格）：QQ 里看不见，人格回复不会带。
@@ -948,7 +948,10 @@ class DshBridgePlugin(Star):
     def _should_capture(self, event: AstrMessageEvent, text: str) -> tuple[bool, str]:
         if not self._enabled():
             return False, ""
-        if self._is_dsh_quote(event):
+        # 「引用 DSH 的回复 = 续聊」，但**@了别人就不算**：那是在跟那个人说话。
+        # 这条判断不能省 —— 「引的是不是 DSH 的正文」只能按内容认，别人把正文复制一遍再被引用
+        # 就分不出来了（实测踩过）。
+        if self._is_dsh_quote(event) and not self._mentions_someone_else(event):
             return True, (text or "").strip() or ("请查看附件" if self._has_inbound_media(event) else "(继续)")
         # 官方通道：AstrBot 不建 Reply，「引用一张图/文件 + @机器人」也接住
         # （附件由 `_official_quoted_media_segments` 从原始 payload 里取）。
@@ -1485,6 +1488,43 @@ class DshBridgePlugin(Star):
         text_out = str(data.get("text") or data.get("message") or "")
         if name in {"text", "approval", "status", "error", "question"} and text_out:
             yield text_out
+
+    def _mentions_someone_else(self, event: AstrMessageEvent) -> bool:
+        """这条消息有没有 @ 到「别人」（不是机器人自己）。
+
+        为什么需要它：`_quoted_is_dsh_content` 只能按**正文内容**判断「引的是不是 DSH 的回复」，
+        所以「别人把机器人的正文复制成自己的消息、你再引用那条复制品」会被误判成续聊
+        （2026-09-20 实测踩到）。而 `@某人 + 引用` 显然是在跟那个人说话，不是跟 DSH 说话 ——
+        用这个信号把它挡掉。
+        """
+        try:
+            self_id = str(event.get_self_id() or "")
+        except Exception:  # noqa: BLE001
+            self_id = ""
+        chain = list(getattr(getattr(event, "message_obj", None), "message", None) or [])
+        for seg in chain:
+            if not isinstance(seg, At):
+                continue
+            qq = str(getattr(seg, "qq", "") or "")
+            if qq and qq != self_id and qq != "qq_official":
+                return True
+        # 官方通道：@ 的信息在原始 payload 的 `mentions` 里（AstrBot 有时把它留成字符串）
+        payload = self._official_raw_payload(event)
+        mentions = payload.get("mentions") if isinstance(payload, dict) else None
+        if isinstance(mentions, list):
+            for item in mentions:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("is_you") is True or item.get("bot") is True:
+                    continue
+                if str(item.get("id") or ""):
+                    return True
+            return False
+        if isinstance(mentions, str) and mentions.strip():
+            if re.search(r"['\"]?(?:is_you|bot)['\"]?\s*:\s*True", mentions):
+                return False
+            return bool(re.search(r"['\"]?id['\"]?\s*:\s*['\"][^'\"]+['\"]", mentions))
+        return False
 
     def _is_explicit_bridge_command(self, text: str) -> bool:
         """是不是「明确在调桥」——只有这种才值得回一句「你不在白名单」。
