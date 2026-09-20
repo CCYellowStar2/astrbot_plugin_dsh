@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.12 — 2026-09-20
+
+### 修复
+
+- **名单外的人「引用 DSH 的回复」问一句，会被再回一遍白名单提示（复读机）**：群里有人引用机器人
+  那条白名单提示问「所以现在到底是什么情况」，插件把它当成「引用 DSH 回复 = 续聊」接住，
+  又回了一遍同样的提示 —— 实机在群里循环了一次（14:18 一次、14:21 又一次）。
+  现在 `_is_explicit_bridge_command()` 只认**真正的 `/dsh …`**：回答类（数字/批准/取消）与
+  「引用 DSH 回复」都静默放行、交回人格。引用仍然会被接住（名单内的人照旧能靠引用续聊），
+  只是名单外的人不再收到那句提示。
+- 排障记录：这次的判定是用容器内探针脚本钉死的（`python /tmp/capture_probe.py`，构造假 event +
+  真实 payload 调 `_should_capture` / `_is_explicit_bridge_command`）。关键事实：
+  **AstrBot 日志里 `message_reference: {'message_id': None}` 不能证明「没有引用」** ——
+  被引正文在原始 payload 的 `msg_elements` 里，而那个字段 AstrBot 的日志根本不打印
+  （botpy 还会凭空造出 `{'message_id': None}`）。
+
 ## 0.3.11 — 2026-09-13
 
 ### 修复

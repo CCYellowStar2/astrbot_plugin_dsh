@@ -108,7 +108,7 @@ def _as_str_list(value: Any) -> list[str]:
     "astrbot_plugin_dsh",
     "local",
     "把指定会话转发给本机 DeepSeek Harness，不接管日常聊天",
-    "0.3.11",
+    "0.3.12",
 )
 class DshBridgePlugin(Star):
     # DSH 出站文本的隐藏标记（两个零宽空格）：QQ 里看不见，人格回复不会带。
@@ -1486,17 +1486,22 @@ class DshBridgePlugin(Star):
         if name in {"text", "approval", "status", "error", "question"} and text_out:
             yield text_out
 
-    def _is_explicit_dsh_attempt(self, event: AstrMessageEvent, text: str) -> bool:
-        """是不是「明确在跟 DSH 说话」——只有这种才值得回一句「你不在白名单」。
+    def _is_explicit_bridge_command(self, text: str) -> bool:
+        """是不是「明确在调桥」——只有这种才值得回一句「你不在白名单」。
 
-        纯编号 / 批准·拒绝这类**回答类**消息不算：它们是被 `_should_capture` 特意接住的
-        （免得被人格当闲聊答了），随便哪个群友打个 `1` 都回一句白名单提示既吵、又等于
-        告诉全群「这里有台 DSH」。这类消息静默放行，交回人格，跟没装桥时一样。
+        两类不算：
+
+        - **回答类**（纯数字 / `批准` / `取消` / `yes`…）：它们是被 `_should_capture` 特意接住的
+          （免得被人格当闲聊答掉），随便哪个群友打个 `1` 都回一句提示既吵、又等于告诉全群
+          「这里有台 DSH」。
+        - **引用 DSH 的回复**：名单外的人引用那条提示来问「这到底什么情况」时，再回一遍同样的
+          提示就成了复读机（2026-09-20 实测在群里循环了一次）；他们本来也接不上会话。
+          静默放行 → 消息落回人格，跟没装桥一样。
+
+        只有真正的 `/dsh …`（或 `dsh …`）才提示。
         """
         if self._looks_like_approval(text):
             return False
-        if self._is_dsh_quote(event):
-            return True
         lowered = (text or "").strip().lower()
         body = lowered[1:] if lowered.startswith("/") else lowered
         cmd = self._command().lower()
@@ -1509,10 +1514,9 @@ class DshBridgePlugin(Star):
         if not capture:
             return
         if not self._allowed(event):
-            # 只有明确在调桥（`/dsh …` 或引用 DSH 的回复）才明说一句：否则 wake_prefix 含 "/" 时
-            # 人格会去回答 "/dsh 帮我改代码" 这句。回答类（数字/批准/取消）静默放行 —— 名单外的人
-            # 本来也答不了（ingress 会按 senderId 拒掉），没必要为它发一条提示。
-            if event.get_group_id() and self._is_explicit_dsh_attempt(event, text):
+            # 只有明确在敲命令（`/dsh …`）才明说一句：否则 wake_prefix 含 "/" 时人格会去回答
+            # "/dsh 帮我改代码" 这句。回答类与「引用 DSH 回复」都静默放行 —— 名单外的人本来也接不上。
+            if event.get_group_id() and self._is_explicit_bridge_command(text):
                 yield self._reply_result(event, "你不在 DSH 白名单里。管理员可在插件配置里添加 QQ 号 / 群号。")
                 event.stop_event()
             # 私聊名单外 / 群里的普通消息：不回复也不 stop，让消息落回 AstrBot 人格正常接管
