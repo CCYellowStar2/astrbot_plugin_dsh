@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.3.20 — 2026-09-26
+
+### 紧急修复（我 0.3.19 引入的崩溃）
+
+- **`dsh web` 致命崩溃**：
+
+  ```
+  dsh: fatal uncaught exception: TypeError: Cannot read properties of null (reading 'write')
+      at sseWrite (.../dsh-astrbot-ingress/lib/index.js:255:7)
+      at Timeout._onTimeout (.../lib/index.js:509:9)
+  ```
+
+  机制：0.3.19 让「流被掐断的回合」降级成**无源流记录**（`turn.res = null`），
+  但只要**有跟随者**，`turnHasSink()` 就为 true —— 于是 digest 定时器一路走到
+  `sseWrite(live.res, …)`，去读 `null.write`。异常从 `setInterval` 里逃出去，
+  **直接杀掉宿主进程**（不是「少发一条状态」，是把整个 `dsh web` 打挂）。
+
+  两处修，一层治标一层治本：
+
+  1. **治本**：那个写出点改成 `turnWrite(live, …)`（写向所有 sink，含 null 安全的
+     `turnSinks()`）—— 无源流记录不再被直接写。minimal 档的保活同理改用 `turnRawWrite`。
+  2. **兜底**：`sseWrite()` 自己加守卫 —— `res` 为空、`write` 不是函数、或 `writableEnded`
+     时**直接返回**。插件跑在宿主进程里，「少发一条状态」和「进程崩掉」完全不对等，
+     这类地方一律 fail-soft。
+
+### 验证
+
+`follow_crash_harness.mjs`：复刻崩溃前状态（QQ 发起回合 → 掐断那条流 → follow 挂上），
+把 `progress_interval_sec` 压到 10 秒等 digest 定时器**真的触发**：
+
+- 带修复：定时器把 `⏳ 已跑 11 秒 · 正在执行` **发给跟随者**，进程存活 ✅
+- **回滚两处修复：逐字复现崩溃** `Cannot read properties of null (reading 'write')` ✅
+  （说明这个 harness 确实咬得住，不是空转）
+
+### 顺带
+
+- `mutable`/`write` 类守卫的教训写进注释：**宿主插件里任何定时器回调都可能杀掉整个 DSH**，
+  写流前必须自己确认 `res` 可用。
+
 ## 0.3.19 — 2026-09-26
 
 ### 修复
