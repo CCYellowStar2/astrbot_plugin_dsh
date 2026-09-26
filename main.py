@@ -108,7 +108,7 @@ def _as_str_list(value: Any) -> list[str]:
     "astrbot_plugin_dsh",
     "local",
     "把指定会话转发给本机 DeepSeek Harness，不接管日常聊天",
-    "0.3.16",
+    "0.3.17",
 )
 class DshBridgePlugin(Star):
     # DSH 出站文本的隐藏标记（两个零宽空格）：QQ 里看不见，人格回复不会带。
@@ -1014,6 +1014,85 @@ class DshBridgePlugin(Star):
             return True, text.strip()
         return False, ""
 
+    async def _follow_active_turn(self, event: AstrMessageEvent) -> AsyncIterator[str]:
+        """跟随「当前正在跑的这一回合」，把它的输出接到这条新消息上。
+
+        为什么需要：官方 QQ 的被动回复额度**按「被回复的那条消息」算**（每条 5 分钟 / 5 次，
+        见 QQ 开放平台「消息收发概述」的「频率与时效规则」）。所以群里每发一条新消息，
+        就换来一份新的 5 条额度 —— 这一句「跟随」正好把额度续上。
+
+        生命周期与正常群里发起一轮**完全一致**：本回合结束（ingress 的 `turn/end`）就断开，
+        不做长期订阅（临时跟随）。
+        """
+        await self._ensure_ingress_pick()
+        url, token, _source = self._ingress_target()
+        if not token:
+            yield "DSH 桥没拿到 token，先按插件配置里的说明把 ingress_url / token 配上。"
+            return
+        umo = self._convo_key(event)
+        timeout = float(self._cfg("timeout_sec", 600) or 600)
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(None, connect=10.0, read=timeout, write=30.0, pool=30.0),
+                trust_env=False,
+            ) as client:
+                async with client.stream(
+                    "GET", f"{url}/follow", params={"umo": umo},
+                    headers={"Authorization": f"Bearer {token}"},
+                ) as resp:
+                    if resp.status_code == 409:
+                        yield "现在没有在跑的回合。跟随只在回合进行中有意义 —— 网页那边跑起来之后再发这句。"
+                        return
+                    if resp.status_code == 400:
+                        yield "这个会话还没绑定 DSH。先在群里发一条 `/dsh <任务>` 或 `/dsh use` 接上。"
+                        return
+                    if resp.status_code >= 400:
+                        body = (await resp.aread()).decode("utf-8", "ignore")[:200]
+                        yield f"跟随失败：DSH ingress HTTP {resp.status_code} {body}"
+                        return
+                    event_name = "message"
+                    data_lines: list[str] = []
+
+                    def flush_event():
+                        raw = "\n".join(data_lines).strip()
+                        data_lines.clear()
+                        name = event_name
+                        if not raw:
+                            return None
+                        try:
+                            data = json.loads(raw)
+                        except json.JSONDecodeError:
+                            data = {"text": raw}
+                        if not isinstance(data, dict):
+                            data = {"text": str(data)}
+                        data["_event"] = name
+                        return data
+
+                    async for line in resp.aiter_lines():
+                        if line.startswith("event:"):
+                            event_name = line[6:].strip() or "message"
+                            continue
+                        if line.startswith("data:"):
+                            data_lines.append(line[5:].lstrip())
+                            continue
+                        if line == "":
+                            flushed = flush_event()
+                            event_name = "message"
+                            if flushed:
+                                async for item in self._emit_sse(event, flushed):
+                                    yield item
+                    leftover = flush_event()
+                    if leftover:
+                        async for item in self._emit_sse(event, leftover):
+                            yield item
+        except httpx.ConnectError:
+            yield f"连不上 DSH ingress（{url}）。确认 dsh web 还在跑。"
+        except httpx.TimeoutException:
+            yield f"跟随超过 {int(timeout)} 秒没有任何输出，已停止跟随。"
+        except Exception as exc:  # noqa: BLE001
+            logger.error("dsh follow failed: %s", exc)
+            yield f"跟随出错：{exc}"
+
     async def _forward(self, event: AstrMessageEvent, text: str) -> AsyncIterator[str]:
         # 没配地址也没信标时，先探一个能用的（Docker 里 host.docker.internal:3188 是常态）
         await self._ensure_ingress_pick()
@@ -1309,6 +1388,15 @@ class DshBridgePlugin(Star):
         text = str(exc)
         return "无权限" in text or "40034105" in text
 
+    def _is_passive_exhausted(self, exc: Exception) -> bool:
+        """被动回复的额度用完了（40034128）。
+
+        QQ 官方规则：被动回复的额度是**按被回复的那条消息**算的（每条 5 分钟 / 5 次）。
+        额度用完时必须**换一条新的入站消息**才有新额度 —— 这就是 `/dsh follow` 的用处。
+        """
+        text = str(exc)
+        return "40034128" in text or "被动回复时间或次数超限" in text
+
     def _should_go_proactive(self, event: AstrMessageEvent) -> bool:
         """官方 Bot 是否改用主动消息。
 
@@ -1347,10 +1435,21 @@ class DshBridgePlugin(Star):
             return out
         except Exception as exc:  # noqa: BLE001
             if not proactive or saved_id is None:
+                if self._is_passive_exhausted(exc):
+                    logger.warning(
+                        "被动回复额度用尽（40034128）：本条消息的 5 次回复已用完，"
+                        "在群里发一条新消息（例如 /dsh follow）即可换新额度续上"
+                    )
                 raise
             if self._is_permission_denied(exc):
                 self._proactive_denied = True
                 logger.warning("没有主动消息权限（40034105），本次及之后都改用被动回复")
+            elif self._is_passive_exhausted(exc):
+                # 主动没权限、被动也到 5 条了：只能等新消息换额度。
+                logger.warning(
+                    "被动回复额度用尽（40034128，本条消息已回 5 次）："
+                    "在群里发一条新消息（例如 /dsh follow）可以换一份新额度续上"
+                )
             else:
                 logger.warning("主动发送失败，回退被动重试：%s", exc)
             event.message_obj.message_id = saved_id
@@ -1597,6 +1696,22 @@ class DshBridgePlugin(Star):
         quiet = payload.lower() in {"stop", "status", "help", "ls", "list", "sessions", "ws", "new", "end", "model", "compact", "last", "perm"} \
             or payload.lower().startswith(("steer ", "use ", "ws ", "session ", "rename ", "send ", "model ", "last ", "perm ")) \
             or self._looks_like_approval(payload)
+
+        # `/dsh follow`：把「当前正在跑的回合」接到这条新消息上（临时跟随，到本回合结束）。
+        # 后面直接 return，不走 _forward —— 它不是一条新任务，只是再挂一条输出流。
+        if payload.strip().lower() in {"follow", "跟随", "续上"}:
+            self._reset_turn(event)
+            event.stop_event()
+            async for chunk in self._follow_active_turn(event):
+                if not isinstance(chunk, str) or not chunk.strip():
+                    continue
+                result = await self._deliver(event, self._reply_result(event, chunk))
+                mid = getattr(result, "message_id", None) or getattr(result, "id", None)
+                if not mid and isinstance(result, dict):
+                    mid = result.get("message_id") or result.get("id")
+                self._remember_outbound(mid, chunk)
+            return
+
         self._reset_turn(event)
         trace_turn = time.monotonic()
         if not quiet:
