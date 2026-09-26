@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.3.22 — 2026-09-26
+
+### 修复
+
+- **解绑后「网页在跑、`/dsh follow` 却说没有在跑的会话」**（用户实测）。0.3.21 新加的
+  `runningSessions()` 里我写的是：
+
+  ```js
+  for (const s of ctx.sessions.list())
+    if (s.agent?.status === 'running') …     // ← Session 根本没有 agent 字段
+  ```
+
+  查了类型定义（`dsh-session/lib/types/index.d.ts`）：`Session` 只有 `id / cwd / header`
+  那几样，**没有 `agent`**。所以这个循环一个都匹配不上，整个函数实际只靠 `state.turns` 的
+  兜底；而解绑之后 `state.turns` 是空的 —— 于是「明明在跑却说没有在跑的会话」。
+
+  正确的权威来源是 **`ctx.agents.list()`**（活 agent 注册表，返回 `Agent[]`），
+  会话 id 取 `agent.session.id`。已改正。
+
+  回滚验证：改回旧写法，harness 立刻复现用户的现象（`400 当前没有绑定会话，也没有正在跑的会话`）。
+
+### 测试基建也要跟着修
+
+- `follow_adopt_harness.mjs` 的桩**把 `Session` 桩成了带 `agent` 字段**，还给 `ctx.agents`
+  漏了 `list()` —— 这正是上面那个错法能混过测试的原因。现在桩按真实形状来
+  （Session 只有 `id`/`header`；判断在跑必须走 `agents.list()`），并注释写明「别再给它加 agent」。
+
+  **教训**：桩的形状必须与真身一致，否则测试会在一个**不存在的世界**里通过。
+
 ## 0.3.21 — 2026-09-26
 
 ### 新增
