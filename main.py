@@ -108,7 +108,7 @@ def _as_str_list(value: Any) -> list[str]:
     "astrbot_plugin_dsh",
     "local",
     "把指定会话转发给本机 DeepSeek Harness，不接管日常聊天",
-    "0.3.20",
+    "0.3.21",
 )
 class DshBridgePlugin(Star):
     # DSH 出站文本的隐藏标记（两个零宽空格）：QQ 里看不见，人格回复不会带。
@@ -1040,11 +1040,15 @@ class DshBridgePlugin(Star):
                     "GET", f"{url}/follow", params={"umo": umo},
                     headers={"Authorization": f"Bearer {token}"},
                 ) as resp:
-                    if resp.status_code == 409:
-                        yield "现在没有在跑的回合。跟随只在回合进行中有意义 —— 网页那边跑起来之后再发这句。"
-                        return
-                    if resp.status_code == 400:
-                        yield "这个会话还没绑定 DSH。先在群里发一条 `/dsh <任务>` 或 `/dsh use` 接上。"
+                    # 400/409 的**原因**由 ingress 在 body 里给准话（未绑定？没有在跑的回合？
+                    # 还是有多个在跑、得先选一个？）—— 别在这里写死一句话，那会与实际情况矛盾。
+                    if resp.status_code in (400, 409):
+                        try:
+                            detail = json.loads((await resp.aread()).decode("utf-8", "ignore"))
+                            msg = str(detail.get("error") or "").strip()
+                        except Exception:  # noqa: BLE001
+                            msg = ""
+                        yield msg or "跟随没接上。先在群里发 `/dsh <任务>` 起一个回合再 follow。"
                         return
                     if resp.status_code >= 400:
                         body = (await resp.aread()).decode("utf-8", "ignore")[:200]
