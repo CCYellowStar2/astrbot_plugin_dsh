@@ -108,7 +108,7 @@ def _as_str_list(value: Any) -> list[str]:
     "astrbot_plugin_dsh",
     "local",
     "把指定会话转发给本机 DeepSeek Harness，不接管日常聊天",
-    "0.3.13",
+    "0.3.16",
 )
 class DshBridgePlugin(Star):
     # DSH 出站文本的隐藏标记（两个零宽空格）：QQ 里看不见，人格回复不会带。
@@ -204,6 +204,31 @@ class DshBridgePlugin(Star):
 
     def _has_inbound_media(self, event: AstrMessageEvent) -> bool:
         return any(isinstance(seg, (Image, File, Video)) for seg in self._iter_media_segments(event))
+
+    def _has_quoted_media(self, event: AstrMessageEvent) -> bool:
+        """**被引消息**里有没有图/文件（不含本条消息自带的附件）。
+
+        为什么需要单独一个：`_has_inbound_media` 把「本条自带的」和「被引消息里的」混在一起，
+        于是「@机器人 + 自己发一张图」会被当成「引用一张图 + @机器人」接住 —— 而后者是官方通道
+        的**特例**（AstrBot 不建 Reply，被引附件只能从原始 payload 里捡），不该顺手把「直接发图」
+        也接管掉：那个开关是 `bound_media_passthrough`。
+        """
+        # aiocqhttp 等：Reply 段里带的附件
+        chain = list(getattr(getattr(event, "message_obj", None), "message", None) or [])
+        for seg in chain:
+            if not isinstance(seg, Reply):
+                continue
+            for inner in getattr(seg, "chain", None) or []:
+                if isinstance(inner, (Image, File, Video)):
+                    return True
+        # 官方通道：被引附件在原始 payload 的 msg_elements[].attachments[]
+        try:
+            return any(
+                isinstance(seg, (Image, File, Video))
+                for seg in self._official_quoted_media_segments(event)
+            )
+        except Exception:  # noqa: BLE001 - 拿不到就当没有被引附件
+            return False
 
     def _is_bot_mention(self, event: AstrMessageEvent) -> bool:
         """这条消息是否 @ 了机器人（官方适配器对 @ 场景会补一个指向 self_id 的 At）。"""
@@ -955,9 +980,12 @@ class DshBridgePlugin(Star):
             return True, (text or "").strip() or ("请查看附件" if self._has_inbound_media(event) else "(继续)")
         # 官方通道：AstrBot 不建 Reply，「引用一张图/文件 + @机器人」也接住
         # （附件由 `_official_quoted_media_segments` 从原始 payload 里取）。
+        # 注意这里必须用 `_has_quoted_media`（只看被引消息）而不是 `_has_inbound_media`：
+        # 后者会把「@机器人 + 自己直接发一张图」也吞掉 —— 那种是 `bound_media_passthrough`
+        # 的开关范围，用户把它关掉就是不想被接管（2026-09-24 实测踩到）。
         if self._is_official_qq(event) \
             and self._is_bot_mention(event) \
-            and self._has_inbound_media(event) \
+            and self._has_quoted_media(event) \
             and self._umo_is_bound(self._convo_key(event)):
             return True, (text or "").strip() or "请查看附件"
         if bool(self._cfg("bound_media_passthrough", True)) \
