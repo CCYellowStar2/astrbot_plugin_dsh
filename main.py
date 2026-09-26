@@ -108,7 +108,7 @@ def _as_str_list(value: Any) -> list[str]:
     "astrbot_plugin_dsh",
     "local",
     "把指定会话转发给本机 DeepSeek Harness，不接管日常聊天",
-    "0.3.18",
+    "0.3.19",
 )
 class DshBridgePlugin(Star):
     # DSH 出站文本的隐藏标记（两个零宽空格）：QQ 里看不见，人格回复不会带。
@@ -1093,6 +1093,44 @@ class DshBridgePlugin(Star):
             logger.error("dsh follow failed: %s", exc)
             yield f"跟随出错：{exc}"
 
+    def _log_quota_exhausted(self) -> None:
+        """被动回复额度用尽时的收场：**只记日志，不再尝试发消息**。
+
+        额度用完就是发不出去了（再发还是 40034128），所以不能「回一句提示」——
+        那只会再撞一次墙、再留一条 traceback。正确做法：安静停下，把话说在日志里；
+        用户发一条**新入站消息**（＝一份新额度）再 `/dsh follow` 就能接着看。
+        """
+        logger.warning(
+            "[dsh] 本条消息的被动回复额度已用尽（40034128，每条消息最多 5 次）："
+            "本次不再尝试发送，回合仍在 DSH 继续跑。"
+            "在群里发一条新消息（例如 /dsh follow）即可换一份新额度接着输出。"
+        )
+
+    async def _try_deliver(self, event: AstrMessageEvent, text: str) -> tuple[bool, str]:
+        """发一条到 QQ；**失败不抛**，返回 (是否成功, 原因)。
+
+        为什么必须吞掉异常：官方 QQ 被动回复额度用尽（40034128）时 `event.send()` 会抛
+        `botpy.errors.ServerError`。异常从 `on_message` 冒出去会**中断整条 SSE 读取循环**，
+        AstrBot 还会记一条「插件处理函数出现异常」—— 而那个回合在 DSH 那边其实还在正常跑。
+        实测（2026-09-26）：用户看到「五条没了，之后 follow 也说没在跑」，traceback 里正是
+        `回复消息失败，被动回复时间或者次数超过限制`。
+
+        正确的收场是：安静停下、让回合继续在 DSH 跑；用户发一条**新消息**（＝新额度）
+        再 `/dsh follow` 就接着看。
+        """
+        try:
+            result = await self._deliver(event, self._reply_result(event, text))
+            mid = getattr(result, "message_id", None) or getattr(result, "id", None)
+            if not mid and isinstance(result, dict):
+                mid = result.get("message_id") or result.get("id")
+            self._remember_outbound(mid, text)
+            return True, ""
+        except Exception as exc:  # noqa: BLE001
+            if self._is_passive_exhausted(exc):
+                return False, "passive-exhausted"
+            logger.warning("发送到 QQ 失败：%s", exc)
+            return False, str(exc)
+
     async def _forward(self, event: AstrMessageEvent, text: str) -> AsyncIterator[str]:
         # 没配地址也没信标时，先探一个能用的（Docker 里 host.docker.internal:3188 是常态）
         await self._ensure_ingress_pick()
@@ -1705,25 +1743,28 @@ class DshBridgePlugin(Star):
             async for chunk in self._follow_active_turn(event):
                 if not isinstance(chunk, str) or not chunk.strip():
                     continue
-                result = await self._deliver(event, self._reply_result(event, chunk))
-                mid = getattr(result, "message_id", None) or getattr(result, "id", None)
-                if not mid and isinstance(result, dict):
-                    mid = result.get("message_id") or result.get("id")
-                self._remember_outbound(mid, chunk)
+                ok, why = await self._try_deliver(event, chunk)
+                if not ok and why == "passive-exhausted":
+                    self._log_quota_exhausted()
+                    return
             return
 
         self._reset_turn(event)
         trace_turn = time.monotonic()
         if not quiet:
-            await self._deliver(event, self._reply_result(event, "已交给 DeepSeek Harness…"))
+            ok, why = await self._try_deliver(event, "已交给 DeepSeek Harness…")
+            if not ok and why == "passive-exhausted":
+                self._log_quota_exhausted()
+                event.stop_event()
+                return
         async for chunk in self._forward(event, payload):
             if not isinstance(chunk, str) or not chunk.strip():
                 continue
-            result = await self._deliver(event, self._reply_result(event, chunk))
-            mid = getattr(result, "message_id", None) or getattr(result, "id", None)
-            if not mid and isinstance(result, dict):
-                mid = result.get("message_id") or result.get("id")
-            self._remember_outbound(mid, chunk)
+            ok, why = await self._try_deliver(event, chunk)
+            if not ok and why == "passive-exhausted":
+                self._log_quota_exhausted()
+                event.stop_event()
+                return
             if self._trace_on():
                 logger.info(
                     "[dsh-trace] body %d chars +%.0fms",
