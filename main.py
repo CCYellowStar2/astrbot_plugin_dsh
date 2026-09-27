@@ -108,7 +108,7 @@ def _as_str_list(value: Any) -> list[str]:
     "astrbot_plugin_dsh",
     "local",
     "把指定会话转发给本机 DeepSeek Harness，不接管日常聊天",
-    "0.3.22",
+    "0.3.23",
 )
 class DshBridgePlugin(Star):
     # DSH 出站文本的隐藏标记（两个零宽空格）：QQ 里看不见，人格回复不会带。
@@ -128,8 +128,13 @@ class DshBridgePlugin(Star):
         self._turn_sends: dict[str, int] = {}
         # umo -> (DSH 侧工作区, 取到的时间)；同机入站暂存目录自动兜底要用
         self._dsh_cwd: dict[str, tuple[str, float]] = {}
-        # 撞过 40034105 就置位：本进程内不再尝试主动消息
-        self._proactive_denied = False
+        # 撞过 40034105 的会话（**按会话记**，不是全局！）
+        #
+        # 为什么必须按会话：主动消息权限是**按群授予**的（要群主在开放平台开）。
+        # 以前这里是个全局布尔，于是**任何一个没权限的群撞一次 40034105，就把所有群
+        # 一起拉黑成被动**，之后连有权限的群也不再尝试主动发送（2026-09-26 实测：
+        # 群 23552507… 无权限，连带把 C121A06D… 也钉死在被动，follow 看起来就「不优先主动」）。
+        self._proactive_denied: set[str] = set()
         # 信标只在第一次用上时打一条日志，别刷屏
         self._beacon_logged = False
         # (时间, 选中的 URL 入站 base)：None 表示「探测过、都不通」
@@ -1450,8 +1455,9 @@ class DshBridgePlugin(Star):
         mode = str(self._cfg("official_send_mode", "passive-first") or "passive-first").strip().lower()
         if mode == "passive":
             return False
-        if self._proactive_denied:
-            # 本进程内已知没有主动消息权限，别再每条都撞一次
+        if self._convo_key(event) in self._proactive_denied:
+            # **这个会话**已知没有主动消息权限，别再每条都撞一次。
+            # 按会话记：别的群没权限不该影响这个群（权限是逐个群授予的）。
             return False
         if mode == "proactive":
             return True
@@ -1484,8 +1490,11 @@ class DshBridgePlugin(Star):
                     )
                 raise
             if self._is_permission_denied(exc):
-                self._proactive_denied = True
-                logger.warning("没有主动消息权限（40034105），本次及之后都改用被动回复")
+                self._proactive_denied.add(self._convo_key(event))
+                logger.warning(
+                    "这个会话没有主动消息权限（40034105），本次及之后改用被动回复"
+                    "（只对该会话生效；别的群若已开权限仍会尝试主动）"
+                )
             elif self._is_passive_exhausted(exc):
                 # 主动没权限、被动也到 5 条了：只能等新消息换额度。
                 logger.warning(
