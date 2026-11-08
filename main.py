@@ -108,7 +108,7 @@ def _as_str_list(value: Any) -> list[str]:
     "astrbot_plugin_dsh",
     "local",
     "把指定会话转发给本机 DeepSeek Harness，不接管日常聊天",
-    "0.3.23",
+    "0.3.24",
 )
 class DshBridgePlugin(Star):
     # DSH 出站文本的隐藏标记（两个零宽空格）：QQ 里看不见，人格回复不会带。
@@ -118,6 +118,10 @@ class DshBridgePlugin(Star):
     _INBOUND_URL_PICK_TTL = 600.0
     # ingress 地址探测结果的缓存时长
     _INGRESS_PICK_TTL = 300.0
+    # 「这个会话绑没绑 DSH」的缓存时长：正常的 30 秒一刷；探测失败 5 秒就重试。
+    # 有缓存时 `_should_capture()` 完全是内存读，事件循环里不会有任何阻塞 I/O。
+    _BINDING_TTL_OK = 30.0
+    _BINDING_TTL_FAIL = 5.0
 
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -128,6 +132,9 @@ class DshBridgePlugin(Star):
         self._turn_sends: dict[str, int] = {}
         # umo -> (DSH 侧工作区, 取到的时间)；同机入站暂存目录自动兜底要用
         self._dsh_cwd: dict[str, tuple[str, float]] = {}
+        # umo -> (是否已绑定, 取到的时间)：由 `_refresh_binding()`（异步）写，
+        # `_umo_is_bound()`（同步，供 `_should_capture()` 用）只读 —— 见那边注释。
+        self._binding_cache: dict[str, tuple[bool, float]] = {}
         # 撞过 40034105 的会话（**按会话记**，不是全局！）
         #
         # 为什么必须按会话：主动消息权限是**按群授予**的（要群主在开放平台开）。
@@ -583,40 +590,67 @@ class DshBridgePlugin(Star):
         return bool(re.fullmatch(r"\d+(?:[\s,，、]+\d+)*", t))
 
     def _umo_is_bound(self, umo: str) -> bool:
-        """这个会话是否已绑定 DSH。
+        """这个会话是否已绑定 DSH —— **纯内存缓存读，绝不在这里发网络请求**。
 
-        顺手把网关返回的 `cwd`（DSH 侧的工作区）缓存下来 —— 同机部署时
+        为什么必须是纯同步读：它被同步的 `_should_capture()` 调用，而后者运行在
+        `on_message()` 这个**异步事件处理器**里。同步 `httpx.Client` 会把 AstrBot 的事件
+        循环整个卡住（最坏 3 秒 × 4 个分支）—— AstrBot 插件市场的自动安全检查正是据此
+        打回的（2026-11-08 审核意见：并发模型问题）。
+        缓存由 `on_message()` 开头的 `await self._refresh_binding(umo)` 统一刷新，
+        见 `_refresh_binding()`。
+        """
+        entry = self._binding_cache.get(umo)
+        return bool(entry[0]) if entry else False
+
+    async def _refresh_binding(self, umo: str, *, force: bool = False) -> bool:
+        """刷新「这个会话是否已绑定 DSH」，**异步 + 短 TTL**，永不阻塞事件循环。
+
+        - 命中缓存直接返回，**不产生任何 I/O**（绝大多数消息走这条）；
+        - 未命中/已过期才发一次 `GET /binding`，用的是 `httpx.AsyncClient`；
+        - 失败也写缓存（更短的 TTL），避免 ingress 没起来时每条消息都等满超时。
+
+        顺手把网关返回的 `cwd`（DSH 侧工作区）缓存进 `_dsh_cwd` —— 同机部署时
         `inbound_share_dir` 可以自动兜底成 `<工作区>/.dsh-inbox`，见 `_inbound_share_dir`。
         """
         if not umo:
             return False
+        now = time.time()
+        entry = self._binding_cache.get(umo)
+        if entry and not force:
+            ttl = self._BINDING_TTL_OK if entry[0] else self._BINDING_TTL_FAIL
+            if now - entry[1] < ttl:
+                return entry[0]
         url, token, _ = self._ingress_target()
         if not token:
+            self._binding_cache[umo] = (False, now)
             return False
         try:
-            with httpx.Client(timeout=3.0, trust_env=False) as client:
-                r = client.get(f"{url}/binding", params={"umo": umo}, headers={"Authorization": f"Bearer {token}"})
-                if r.status_code == 200:
-                    payload = r.json()
+            async with httpx.AsyncClient(timeout=3.0, trust_env=False) as client:
+                resp = await client.get(
+                    f"{url}/binding",
+                    params={"umo": umo},
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                if resp.status_code == 200:
+                    payload = resp.json() or {}
+                    bound = bool(payload.get("bound"))
                     cwd = str(payload.get("cwd") or "").strip()
                     if cwd:
-                        self._dsh_cwd[umo] = (cwd, time.time())
-                    return bool(payload.get("bound"))
-        except Exception:
-            return False
+                        self._dsh_cwd[umo] = (cwd, now)
+                    self._binding_cache[umo] = (bound, now)
+                    return bound
+        except Exception as exc:  # noqa: BLE001 - 探测失败不该影响收消息
+            logger.debug("binding probe failed for %s: %s", umo, exc)
+        self._binding_cache[umo] = (False, now)
         return False
 
     def _dsh_side_cwd(self, umo: str) -> str:
-        """这个会话在 DSH 侧的工作区。
+        """这个会话在 DSH 侧的工作区（同样**纯缓存读**，不在这里发请求）。
 
-        缓存 5 分钟：`/dsh ws` 会换工作区，过期就重新问一次网关。
+        缓存由 `_refresh_binding()` 顺带写入；没有缓存时返回空串，让调用方走配置兜底。
         """
         if not umo:
             return ""
-        entry = self._dsh_cwd.get(umo)
-        if entry and time.time() - entry[1] < 300:
-            return entry[0]
-        self._umo_is_bound(umo)  # 顺便刷新缓存
         entry = self._dsh_cwd.get(umo)
         return entry[0] if entry else ""
 
@@ -1728,6 +1762,10 @@ class DshBridgePlugin(Star):
     @filter.event_message_type(filter.EventMessageType.ALL, priority=50)
     async def on_message(self, event: AstrMessageEvent):
         text = (event.message_str or "").strip()
+        # 先把「这个会话绑定没绑定 DSH」**异步**刷进缓存（命中缓存时零 I/O），
+        # 随后同步的 `_should_capture()` 只读内存 —— 事件循环里不会出现阻塞式 HTTP。
+        # 这是 AstrBot 市场安全检查要求的并发模型（2026-11-08 打回意见）。
+        await self._refresh_binding(self._convo_key(event))
         capture, payload = self._should_capture(event, text)
         if not capture:
             return
