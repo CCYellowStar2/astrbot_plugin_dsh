@@ -108,7 +108,7 @@ def _as_str_list(value: Any) -> list[str]:
     "astrbot_plugin_dsh",
     "local",
     "把指定会话转发给本机 DeepSeek Harness，不接管日常聊天",
-    "0.3.24",
+    "0.3.25",
 )
 class DshBridgePlugin(Star):
     # DSH 出站文本的隐藏标记（两个零宽空格）：QQ 里看不见，人格回复不会带。
@@ -1765,7 +1765,12 @@ class DshBridgePlugin(Star):
         # 先把「这个会话绑定没绑定 DSH」**异步**刷进缓存（命中缓存时零 I/O），
         # 随后同步的 `_should_capture()` 只读内存 —— 事件循环里不会出现阻塞式 HTTP。
         # 这是 AstrBot 市场安全检查要求的并发模型（2026-11-08 打回意见）。
-        await self._refresh_binding(self._convo_key(event))
+        #
+        # 例外：审批/取消（纯数字、「批准」「取消」等）**强制刷新**。这类消息接不接取决于
+        # 此刻到底绑没绑，等 TTL 会判错 —— 而「`/dsh <任务>` 刚建立绑定 → 工具要审批 →
+        # 用户回 `1`」是最常见的链路。审批消息很少，多一次本地请求换正确性值得。
+        convo = self._convo_key(event)
+        await self._refresh_binding(convo, force=self._looks_like_approval(text))
         capture, payload = self._should_capture(event, text)
         if not capture:
             return
@@ -1798,6 +1803,9 @@ class DshBridgePlugin(Star):
                 if not ok and why == "passive-exhausted":
                     self._log_quota_exhausted()
                     return
+            # `/dsh follow` 在未绑定时可能顺手把本会话「自动绑上」（接唯一在跑的那个会话），
+            # 这里同步一次缓存，别让下一次消息还按「未绑定」判。
+            await self._refresh_binding(self._convo_key(event), force=True)
             return
 
         self._reset_turn(event)
@@ -1824,4 +1832,7 @@ class DshBridgePlugin(Star):
                 )
         if self._trace_on():
             logger.info("[dsh-trace] turn done +%.0fms", (time.monotonic() - trace_turn) * 1000)
+        # 这一轮很可能刚建立/改变了绑定（`/dsh <任务>`、`new`、`use`、`end` 都走 _forward），
+        # 立刻把缓存同步过来，免得紧跟其后的审批/续聊被 TTL 漏接。
+        await self._refresh_binding(self._convo_key(event), force=True)
         event.stop_event()
